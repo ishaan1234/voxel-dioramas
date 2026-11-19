@@ -7,6 +7,54 @@ use super::voxel::{MeshData, ModelInstance, VoxelVertex};
 
 pub const MAX_POINT_LIGHTS: usize = 12;
 
+/// Season a world is generated for (palettes, foliage, snow cover...).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Season {
+    Spring,
+    Summer,
+    Autumn,
+    Winter,
+}
+
+impl Season {
+    pub const ALL: [Season; 4] = [Season::Spring, Season::Summer, Season::Autumn, Season::Winter];
+    pub fn name(self) -> &'static str {
+        match self {
+            Season::Spring => "Spring",
+            Season::Summer => "Summer",
+            Season::Autumn => "Autumn",
+            Season::Winter => "Winter",
+        }
+    }
+}
+
+/// Inputs to world generation. `seed == 0` is each scene's canonical,
+/// hand-tuned layout; any other seed produces a new variation of it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct WorldParams {
+    pub seed: u32,
+    pub season: Season,
+}
+
+impl Default for WorldParams {
+    fn default() -> Self {
+        Self { seed: 0, season: Season::Spring }
+    }
+}
+
+/// A named point of interest in a scene: used as courier stops, photo-hunt
+/// subjects, ambient-tour waypoints, etc.
+#[derive(Clone, Debug)]
+pub struct Landmark {
+    pub name: String,
+    /// World position of the thing itself.
+    pub pos: Vec3,
+    /// Rough size (metres), for framing and proximity checks.
+    pub radius: f32,
+    /// Free-form tag, e.g. "island", "building", "tree", "bridge", "water".
+    pub kind: &'static str,
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct DrawBatch {
     pub idx_start: u32,
@@ -110,6 +158,8 @@ pub struct SceneData {
     pub time_modes: [TimeModeParams; 3],
     pub shadow: ShadowConfig,
     pub particles: ParticleConfig,
+    /// Points of interest (may be empty).
+    pub landmarks: Vec<Landmark>,
 }
 
 impl SceneData {
@@ -130,6 +180,41 @@ pub trait Scene {
     fn data(&self) -> &SceneData;
     /// Fill `out` with exactly `data().dynamic_inst_count` instances for time `t`.
     fn update_dynamic_instances(&self, t: f32, out: &mut Vec<ModelInstance>);
+    /// Walkable ground height at world (x, z), if any. Used for picking
+    /// (tap-to-place) and for keeping cameras / gliders above ground.
+    fn surface_y(&self, _x: f32, _z: f32) -> Option<f32> {
+        None
+    }
+    /// For experiences that need scene-specific data (downcast with
+    /// `scene.as_any().downcast_ref::<MyScene>()`).
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// March a ray against `Scene::surface_y`; returns the first ground hit.
+pub fn raycast_surface(scene: &dyn Scene, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<Vec3> {
+    let dir = dir.normalize_or_zero();
+    let mut t = 0.0;
+    let mut prev: Option<(f32, f32)> = None; // (t, height above ground)
+    while t < max_dist {
+        let p = origin + dir * t;
+        if let Some(g) = scene.surface_y(p.x, p.z) {
+            let h = p.y - g;
+            if h <= 0.0 {
+                // Refine between the previous sample and this one.
+                let (t0, h0) = prev.unwrap_or((t, h));
+                let f = if (h0 - h).abs() > 1e-5 { h0 / (h0 - h) } else { 0.0 };
+                let th = t0 + (t - t0) * f.clamp(0.0, 1.0);
+                let q = origin + dir * th;
+                return Some(Vec3::new(q.x, scene.surface_y(q.x, q.z).unwrap_or(q.y), q.z));
+            }
+            prev = Some((t, h));
+            t += (h * 0.5).clamp(0.25, 4.0);
+        } else {
+            prev = None;
+            t += 2.0;
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------

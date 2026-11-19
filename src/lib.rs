@@ -1,6 +1,7 @@
 //! Voxel Dioramas: a multi-scene micro-voxel engine (desktop + WebGPU).
 
 pub mod engine;
+pub mod experiences;
 pub mod scenes;
 
 /// Browser entry point: runs when the WebAssembly module is instantiated.
@@ -17,7 +18,7 @@ pub fn web_start() {
         .unwrap_or("");
     let scene_idx = scenes::REGISTRY.iter().position(|e| e.id == wanted).unwrap_or(0);
     let opts = engine::app::RunOptions { scene_idx, ..Default::default() };
-    engine::app::run(scenes::REGISTRY, opts);
+    engine::app::run(scenes::REGISTRY, experiences::REGISTRY, opts);
 }
 
 /// Called by the HTML control bar: "next_scene", "prev_scene", "time", "tour",

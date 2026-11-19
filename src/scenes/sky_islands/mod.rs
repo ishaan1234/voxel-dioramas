@@ -20,6 +20,9 @@ use effects::{Bird, Islet, Puff, Spray};
 
 pub struct SkyIslands {
     data: SceneData,
+    /// The generated islands (shape functions), for picking and experiences.
+    pub islands: Vec<island::IslandSpec>,
+    pub params: WorldParams,
     armillary: Vec3,
     islets: [Vec<Islet>; 3],
     birds: Vec<Bird>,
@@ -27,13 +30,28 @@ pub struct SkyIslands {
     spray: Vec<Spray>,
 }
 
-pub fn build() -> Box<dyn Scene> {
-    Box::new(SkyIslands::build())
+pub fn build(params: &WorldParams) -> Box<dyn Scene> {
+    Box::new(SkyIslands::build(params))
 }
 
 impl Scene for SkyIslands {
     fn data(&self) -> &SceneData {
         &self.data
+    }
+
+    fn surface_y(&self, x: f32, z: f32) -> Option<f32> {
+        // Highest island top under (x, z), if any.
+        self.islands
+            .iter()
+            .filter_map(|s| {
+                let (lx, lz) = (x - s.center.x, z - s.center.z);
+                (s.e(lx, lz) < 1.0).then(|| s.center.y + s.top_y(lx, lz))
+            })
+            .reduce(f32::max)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     fn update_dynamic_instances(&self, t: f32, out: &mut Vec<ModelInstance>) {
@@ -167,7 +185,7 @@ mod tests {
 
     #[test]
     fn sky_islands_scene_is_consistent() {
-        let scene = SkyIslands::build();
+        let scene = SkyIslands::build(&WorldParams::default());
         let d = scene.data();
         assert!(d.total_voxels > 1_000_000, "{}", d.total_voxels);
         crate::engine::scene::assert_scene_consistent(&scene);

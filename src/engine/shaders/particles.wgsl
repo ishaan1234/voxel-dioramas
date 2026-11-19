@@ -25,10 +25,12 @@ fn cs_petals(@builtin(global_invocation_id) gid: vec3<u32>) {
     let wind_x = sin(sim.time * 0.42) * 0.55 + 0.75;
     let wind_z = cos(sim.time * 0.35) * 0.42;
 
+    // bmin.w = sway: 1 = drifting petals / flakes, 0 = straight rain.
+    let sway = sim.bmin.w;
     p.pos_spin.y -= p.vel_col.x * sim.dt;
-    p.pos_spin.x += (p.vel_col.y * wind_x + sin(sim.time * 2.0 + phase) * 0.65) * sim.dt;
-    p.pos_spin.z += (wind_z + cos(sim.time * 1.7 + phase) * 0.55) * sim.dt;
-    p.pos_spin.w += (1.2 + sin(phase) * 1.6) * sim.dt;
+    p.pos_spin.x += (p.vel_col.y * wind_x + sin(sim.time * 2.0 + phase) * 0.65 * sway) * sim.dt;
+    p.pos_spin.z += (wind_z + cos(sim.time * 1.7 + phase) * 0.55 * sway) * sim.dt;
+    p.pos_spin.w += (1.2 + sin(phase) * 1.6) * sim.dt * sway;
 
     let ext = sim.bmax.xyz - sim.bmin.xyz;
     if (p.pos_spin.y < sim.bmin.y) { p.pos_spin.y = sim.bmax.y + f32(idx % 9u); }

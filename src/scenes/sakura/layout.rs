@@ -50,7 +50,7 @@ struct MeshSpan {
 }
 
 impl SakuraScene {
-    pub fn build() -> Self {
+    pub fn build(params: &WorldParams) -> Self {
         let mut rng = Rng(20261113);
         let mut colors = ColorCache::new();
         let mut total_voxels = (GRID_N * GRID_N) as u64;
@@ -726,10 +726,14 @@ impl SakuraScene {
             time_modes: time_modes(),
             shadow: ShadowConfig { target: Vec3::new(0.0, 18.0, -10.0), half_extent: 240.0, near: 20.0, far: 650.0 },
             particles: petals(),
+            landmarks: landmarks(),
         };
+        let heights = grid.top_y.iter().zip(&grid.water_y).map(|(&t, &w)| t.max(w)).collect();
 
         Self {
             data,
+            heights,
+            params: *params,
             boats_row,
             boats_yaka,
             villagers,

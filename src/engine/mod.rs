@@ -1,4 +1,5 @@
 pub mod app;
+pub mod atmosphere;
 pub mod camera;
 pub mod color;
 pub mod culling;
@@ -7,9 +8,13 @@ pub mod gpu;
 // primitive is used by every build.
 #[allow(dead_code)]
 pub mod math;
+pub mod experience;
 pub mod pipelines;
 pub mod platform;
+pub mod props;
 pub mod scene;
+pub mod storage;
+pub mod ui;
 #[allow(dead_code)]
 pub mod sdf;
 #[allow(dead_code)]
@@ -42,8 +47,8 @@ pub mod prelude {
         CatmullRomCurve3, Rng,
     };
     pub use super::scene::{
-        CameraPreset, DrawBatch, MeshSpan, ParticleConfig, Pass, Scene, SceneBuilder, SceneData,
-        ShadowConfig, TimeModeParams,
+        raycast_surface, CameraPreset, DrawBatch, Landmark, MeshSpan, ParticleConfig, Pass, Scene,
+        SceneBuilder, SceneData, Season, ShadowConfig, TimeModeParams, WorldParams,
     };
     pub use super::voxel::{
         build_unit_box_mesh, MeshData, MicroVoxelVolume, ModelInstance, VoxelVertex, MAT_AIR, MAT_CLOUD, MAT_FOLIAGE,

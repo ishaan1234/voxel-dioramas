@@ -116,7 +116,7 @@ fn heading(from: Vec3, to: Vec3) -> f32 {
 }
 
 impl SkyIslands {
-    pub fn build() -> Self {
+    pub fn build(params: &WorldParams) -> Self {
         let mut rng = Rng(7_2026);
         let mut sb = SceneBuilder::new();
 
@@ -397,10 +397,32 @@ impl SkyIslands {
             time_modes: time_modes(),
             shadow: ShadowConfig { target: Vec3::new(0.0, 60.0, 0.0), half_extent: 235.0, near: 20.0, far: 950.0 },
             particles: leaves(),
+            landmarks: Vec::new(),
         };
+        let mut data = data;
+        data.landmarks = sky_landmarks(&islands, &bridges, &lips, armillary);
 
-        Self { data, armillary, islets, birds, clouds, spray }
+        Self { data, islands, params: *params, armillary, islets, birds, clouds, spray }
     }
+}
+
+/// Points of interest derived from the generated geometry.
+fn sky_landmarks(islands: &[IslandSpec], bridges: &[(usize, usize, BridgeSpec)], lips: &[(Vec3, Vec3)], armillary: Vec3) -> Vec<Landmark> {
+    let mut v = Vec::new();
+    for s in islands {
+        v.push(Landmark { name: s.name.to_string(), pos: s.center + Vec3::Y * 2.0, radius: s.radius, kind: "island" });
+    }
+    v.push(Landmark { name: "Observatory".into(), pos: islands[HERO].center + Vec3::Y * 10.0, radius: 9.0, kind: "building" });
+    v.push(Landmark { name: "Armillary Sphere".into(), pos: armillary, radius: 6.0, kind: "artifact" });
+    v.push(Landmark { name: "Spirit Tree".into(), pos: islands[SPIRIT].center + Vec3::Y * 14.0, radius: 14.0, kind: "tree" });
+    for (i, &(lip, _)) in lips.iter().enumerate() {
+        v.push(Landmark { name: format!("Waterfall {}", i + 1), pos: lip - Vec3::Y * 10.0, radius: 8.0, kind: "water" });
+    }
+    for (i, (a, b, br)) in bridges.iter().enumerate() {
+        let name = format!("Bridge {}: {} to {}", i + 1, islands[*a].name, islands[*b].name);
+        v.push(Landmark { name, pos: br.world_point(0.5), radius: br.length() * 0.5, kind: "bridge" });
+    }
+    v
 }
 
 /// Camera presets derived from the generated geometry (so they stay valid if

@@ -215,6 +215,9 @@ struct WfParticle {
 
 pub struct SakuraScene {
     data: SceneData,
+    /// Ground / water surface height per terrain cell (micro units), for picking.
+    heights: Vec<i16>,
+    pub params: WorldParams,
     boats_row: Vec<BoatAnim>,
     boats_yaka: Vec<BoatAnim>,
     villagers: [Vec<VillagerAnim>; 4],
@@ -223,13 +226,51 @@ pub struct SakuraScene {
     wf_particles: Vec<WfParticle>,
 }
 
-pub fn build() -> Box<dyn Scene> {
-    Box::new(SakuraScene::build())
+pub fn build(params: &WorldParams) -> Box<dyn Scene> {
+    Box::new(SakuraScene::build(params))
+}
+
+/// Named places in the empire (courier stops, photo subjects, tour stops).
+pub fn landmarks() -> Vec<Landmark> {
+    let l = |name: &str, x: f32, y: f32, z: f32, radius: f32, kind: &'static str| Landmark {
+        name: name.to_string(),
+        pos: Vec3::new(x, y, z),
+        radius,
+        kind,
+    };
+    vec![
+        l("Seven-Tier Pagoda", -56.0, 52.0, -82.0, 12.0, "building"),
+        l("Golden Hall", 36.0, 36.0, -82.0, 14.0, "building"),
+        l("Great Gate", 0.0, 28.0, -30.25, 10.0, "building"),
+        l("Cliff Temple", 110.0, 40.0, -44.0, 10.0, "building"),
+        l("Senbon Torii Path", -136.0, 30.0, -54.0, 14.0, "path"),
+        l("Inari Shrine", -146.0, 46.0, -88.0, 8.0, "building"),
+        l("Grand Bridge", 0.0, 14.0, 44.0, 10.0, "bridge"),
+        l("Watermill", -116.0, 13.0, 4.5, 7.0, "building"),
+        l("Harbor", 137.0, 10.0, 55.0, 14.0, "water"),
+        l("Town Square", 0.0, 12.0, 118.0, 18.0, "town"),
+        l("Mountain Waterfall", 132.0, 40.0, -66.0, 10.0, "water"),
+        l("Zen Courtyard", 46.0, 23.0, -40.0, 10.0, "garden"),
+    ]
 }
 
 impl Scene for SakuraScene {
     fn data(&self) -> &SceneData {
         &self.data
+    }
+
+    fn surface_y(&self, x: f32, z: f32) -> Option<f32> {
+        let gx = terrain::w_to_g(x);
+        let gz = terrain::w_to_g(z);
+        let n = terrain::GRID_N as i32;
+        if gx < 0 || gz < 0 || gx >= n || gz >= n {
+            return None;
+        }
+        Some(self.heights[terrain::g_idx(gx as usize, gz as usize)] as f32 * terrain::T_CELL)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     fn update_dynamic_instances(&self, t: f32, out: &mut Vec<ModelInstance>) {
@@ -348,7 +389,7 @@ mod tests {
 
     #[test]
     fn sakura_scene_is_consistent() {
-        let scene = SakuraScene::build();
+        let scene = SakuraScene::build(&WorldParams::default());
         let d = scene.data();
         assert!(d.total_voxels > 1_000_000);
         assert!(d.total_tris > 1_000_000);

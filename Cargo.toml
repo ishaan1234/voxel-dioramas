@@ -16,18 +16,26 @@ glam = { version = "0.33", features = ["bytemuck"] }
 bytemuck = { version = "1.25", features = ["derive"] }
 # std::time::Instant panics in browsers; web-time is std's Instant on native.
 web-time = "1.1"
+# UI (desktop + web). egui 0.37 targets exactly wgpu 30 / winit 0.30.
+egui = { version = "0.37", features = ["default_fonts", "monochrome_emoji_fonts"] }
+egui-wgpu = { version = "0.37", features = ["winit"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "1.0"
 png = "0.18"
+egui-winit = "0.37"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Pinned exactly: the wasm-bindgen CLI used to post-process the build must match.
 wasm-bindgen = "=0.2.130"
 wasm-bindgen-futures = "0.4.80"
 js-sys = "0.3.107"
-web-sys = { version = "0.3.107", features = ["Window", "Document", "Element", "HtmlCanvasElement", "Location"] }
+web-sys = { version = "0.3.107", features = ["Window", "Document", "Element", "HtmlCanvasElement", "Location", "Storage"] }
 console_error_panic_hook = "0.1"
+egui-winit = { version = "0.37", default-features = false }
 
 [profile.release]
 # Smaller, faster WebAssembly; harmless for native.

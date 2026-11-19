@@ -1,5 +1,6 @@
-//! winit event loop, input (mouse, keyboard, touch), commands from the web UI,
-//! and scene switching. Works on desktop and in the browser (WebGPU).
+//! winit event loop: input routing (egui → experience → default camera),
+//! the per-frame experience/UI cycle, and scene (re)generation.
+//! Works on desktop and in the browser (WebGPU).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -13,13 +14,18 @@ use winit::{
     window::{Window, WindowId},
 };
 
+use super::experience::{Experience, ExperienceEntry, Requests};
 use super::gpu::GpuState;
 use super::platform;
-use super::scene::Scene;
+use super::scene::{Scene, WorldParams};
+use super::storage::Storage;
+use super::ui::{self, EguiLayer, ShellAction, ShellView};
 
 pub struct SceneEntry {
     pub id: &'static str,
-    pub build: fn() -> Box<dyn Scene>,
+    /// Display name for menus.
+    pub title: &'static str,
+    pub build: fn(&WorldParams) -> Box<dyn Scene>,
 }
 
 /// One offscreen screenshot request: `--shot preset:time:seconds:path.png`.
@@ -34,19 +40,24 @@ pub struct Shot {
 
 pub struct RunOptions {
     pub scene_idx: usize,
+    pub params: WorldParams,
+    pub experience: Option<String>,
     pub shots: Vec<Shot>,
     pub shot_size: (u32, u32),
     /// `--bench`: time every camera preset offscreen and exit.
     pub bench: bool,
+    /// Screenshot overrides: weather and continuous hour.
+    pub weather: Option<super::atmosphere::Weather>,
+    pub hour: Option<f32>,
 }
 
 impl Default for RunOptions {
     fn default() -> Self {
-        Self { scene_idx: 0, shots: Vec::new(), shot_size: (1600, 900), bench: false }
+        Self { scene_idx: 0, params: WorldParams::default(), experience: None, shots: Vec::new(), shot_size: (1600, 900), bench: false, weather: None, hour: None }
     }
 }
 
-/// Actions that can come from the keyboard or from the web page's buttons.
+/// Actions that can come from the keyboard or from the web page.
 #[derive(Clone, Copy, Debug)]
 pub enum Command {
     NextScene,
@@ -97,36 +108,47 @@ impl Touches {
     }
 }
 
+type PendingScene = Rc<RefCell<Option<(usize, WorldParams, Box<dyn Scene>)>>>;
+
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 struct App {
     registry: &'static [SceneEntry],
+    experiences: &'static [ExperienceEntry],
     opts: RunOptions,
     scene_idx: usize,
+    params: WorldParams,
     window: Option<Arc<Window>>,
     state: Option<GpuState>,
     /// Filled asynchronously (browser GPU init / deferred scene builds).
     pending_state: Rc<RefCell<Option<GpuState>>>,
-    pending_scene: Rc<RefCell<Option<Box<dyn Scene>>>>,
+    pending_scene: PendingScene,
     loading: bool,
     touches: Touches,
+    ui: Option<EguiLayer>,
+    shell_expanded: bool,
+    exp_idx: usize,
+    exp: Box<dyn Experience>,
+    exp_started: bool,
+    storage: Storage,
+    requests: Requests,
+    toast: Option<(String, f32)>,
 }
 
 impl App {
-    /// Build scene `idx` and hand it to the renderer. In the browser the build
-    /// is deferred until the loading message has painted.
-    fn request_scene(&mut self, idx: usize) {
+    /// Generate scene `idx` with `params`. In the browser the build is
+    /// deferred until the loading message has painted.
+    fn request_scene(&mut self, idx: usize, params: WorldParams) {
         if self.loading {
             return;
         }
-        self.scene_idx = idx;
         let entry = &self.registry[idx];
-        platform::status(&format!("Generating {}...", entry.id));
+        platform::status(&format!("Generating {}...", entry.title));
         #[cfg(not(target_arch = "wasm32"))]
         {
             let t0 = web_time::Instant::now();
-            let scene = (entry.build)();
-            println!("Generated {} in {:.2}s", entry.id, t0.elapsed().as_secs_f32());
-            *self.pending_scene.borrow_mut() = Some(scene);
+            let scene = (entry.build)(&params);
+            println!("Generated {} (seed {}, {}) in {:.2}s", entry.id, params.seed, params.season.name(), t0.elapsed().as_secs_f32());
+            *self.pending_scene.borrow_mut() = Some((idx, params, scene));
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -136,7 +158,7 @@ impl App {
             let window = self.window.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 platform::web::yield_to_browser().await;
-                *slot.borrow_mut() = Some(build());
+                *slot.borrow_mut() = Some((idx, params, build(&params)));
                 if let Some(w) = window {
                     w.request_redraw();
                 }
@@ -147,7 +169,11 @@ impl App {
     fn switch_scene(&mut self, delta: isize) {
         let n = self.registry.len() as isize;
         let idx = (self.scene_idx as isize + delta).rem_euclid(n) as usize;
-        self.request_scene(idx);
+        self.request_scene(idx, self.params);
+    }
+
+    fn scene_index(&self, id: &str) -> Option<usize> {
+        self.registry.iter().position(|e| e.id == id)
     }
 
     fn apply(&mut self, c: Command) {
@@ -167,25 +193,148 @@ impl App {
         }
     }
 
+    /// Run `f` with an experience context for the current frame.
+    fn with_ctx<R>(&mut self, dt: f32, f: impl FnOnce(&mut dyn Experience, &mut super::experience::Ctx) -> R) -> Option<R> {
+        let s = self.state.as_mut()?;
+        let id = self.registry[self.scene_idx].id;
+        let mut ctx = s.ctx(id, self.params, &mut self.storage, &mut self.requests, dt);
+        Some(f(self.exp.as_mut(), &mut ctx))
+    }
+
+    fn switch_experience(&mut self, idx: usize) {
+        if idx == self.exp_idx && self.exp_started {
+            return;
+        }
+        self.with_ctx(0.0, |e, c| e.exit(c));
+        self.exp_idx = idx;
+        self.exp = (self.experiences[idx].make)();
+        self.with_ctx(0.0, |e, c| {
+            e.enter(c);
+            e.scene_loaded(c);
+        });
+        self.exp_started = true;
+    }
+
     /// Adopt anything that finished asynchronously, then run queued commands.
     fn pump(&mut self) {
         if self.state.is_none() {
             if let Some(st) = self.pending_state.borrow_mut().take() {
+                self.ui = Some(st.make_ui());
                 self.state = Some(st);
                 self.loading = false;
                 platform::status("");
             }
         }
-        if let Some(s) = self.state.as_mut() {
-            if let Some(scene) = self.pending_scene.borrow_mut().take() {
-                s.load_scene(scene);
-                self.loading = false;
-                platform::status("");
-            }
+        if self.state.is_some() && !self.exp_started {
+            self.exp_started = true;
+            self.with_ctx(0.0, |e, c| {
+                e.enter(c);
+                e.scene_loaded(c);
+            });
+        }
+        let loaded = self.pending_scene.borrow_mut().take();
+        if let (Some((idx, params, scene)), Some(s)) = (loaded, self.state.as_mut()) {
+            s.load_scene(scene);
+            self.scene_idx = idx;
+            self.params = params;
+            self.loading = false;
+            platform::status("");
+            self.with_ctx(0.0, |e, c| e.scene_loaded(c));
         }
         let cmds: Vec<Command> = COMMANDS.with(|q| q.borrow_mut().drain(..).collect());
         for c in cmds {
             self.apply(c);
+        }
+    }
+
+    /// One frame: UI + experience logic + render.
+    fn frame(&mut self) {
+        self.pump();
+        let (Some(s), Some(ui)) = (self.state.as_mut(), self.ui.as_mut()) else { return };
+        let dt = s.begin_frame();
+        ui.begin(&s.window);
+        let egui_ctx = ui.ctx.clone();
+
+        // Global menu bar.
+        let mut actions = Vec::new();
+        if !self.exp.immersive() || self.shell_expanded {
+            let presets = s.scene().data().presets.iter().map(|p| p.name).collect();
+            let mut view = ShellView {
+                scenes: self.registry,
+                scene_idx: self.scene_idx,
+                experiences: self.experiences,
+                exp_idx: self.exp_idx,
+                params: self.params,
+                atmo: &mut s.atmo,
+                presets,
+                tour: s.cam.tour,
+                paused: s.paused,
+                fps: s.fps,
+                loading: self.loading,
+            };
+            actions = ui::shell_ui(&egui_ctx, &mut view, &mut self.shell_expanded);
+        } else {
+            egui::Area::new(egui::Id::unique("menu_reveal")).anchor(egui::Align2::LEFT_TOP, [8.0, 8.0]).show(&egui_ctx, |ui| {
+                if ui.button("Menu").clicked() {
+                    self.shell_expanded = true;
+                }
+            });
+        }
+
+        // Experience UI and logic.
+        self.with_ctx(dt, |e, c| {
+            e.ui(&egui_ctx, c);
+            e.update(c);
+        });
+
+        // Toasts.
+        if let Some(msg) = self.requests.toast.take() {
+            self.toast = Some((msg, 3.0));
+        }
+        if let Some((msg, left)) = &mut self.toast {
+            *left -= dt;
+            egui::Area::new(egui::Id::unique("toast")).anchor(egui::Align2::CENTER_TOP, [0.0, 70.0]).show(&egui_ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(msg.as_str()));
+            });
+            if *left <= 0.0 {
+                self.toast = None;
+            }
+        }
+
+        let (Some(s), Some(ui)) = (self.state.as_mut(), self.ui.as_mut()) else { return };
+        s.render(dt, Some(ui));
+
+        // Apply menu actions and experience requests.
+        for a in actions {
+            match a {
+                ShellAction::LoadScene(i, p) => self.request_scene(i, p),
+                ShellAction::Experience(i) => self.switch_experience(i),
+                ShellAction::Preset(i) => {
+                    if let Some(s) = self.state.as_mut() {
+                        s.fly_to_preset(i)
+                    }
+                }
+                ShellAction::ToggleTour => {
+                    if let Some(s) = self.state.as_mut() {
+                        s.cam.toggle_tour()
+                    }
+                }
+                ShellAction::TogglePause => {
+                    if let Some(s) = self.state.as_mut() {
+                        s.paused = !s.paused
+                    }
+                }
+            }
+        }
+        if let Some((id, params)) = self.requests.load_scene.take() {
+            if let Some(i) = self.scene_index(&id) {
+                self.request_scene(i, params);
+            }
+        }
+        if let Some(id) = self.requests.switch_experience.take() {
+            if let Some(i) = self.experiences.iter().position(|e| e.id == id) {
+                self.switch_experience(i);
+            }
         }
     }
 
@@ -225,95 +374,12 @@ impl App {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn run_offscreen_jobs(&mut self, state: &mut GpuState, event_loop: &ActiveEventLoop) -> bool {
-        if self.opts.bench {
-            let (w, h) = self.opts.shot_size;
-            let n = state.preset_count();
-            let mut total = 0.0;
-            println!("Benchmark {w}x{h}, 200 frames per view (no vsync):");
-            for p in 0..n {
-                state.set_preset(p);
-                let (mean, p95) = state.bench(200, w, h);
-                total += mean;
-                println!("  {:<20} mean {mean:6.2} ms  p95 {p95:6.2} ms  ({:.0} fps)", state.cam.preset_name, 1000.0 / mean);
-            }
-            println!("  average over views: {:.2} ms ({:.0} fps)", total / n as f32, 1000.0 * n as f32 / total);
-            event_loop.exit();
-            return true;
-        }
-        if !self.opts.shots.is_empty() {
-            let (w, h) = self.opts.shot_size;
-            for shot in &self.opts.shots {
-                state.set_preset(shot.preset);
-                if let Some((eye, target)) = shot.view {
-                    state.cam.set_view(eye, target);
-                }
-                state.time_mode = shot.time_mode % 3;
-                state.capture(shot.t, w, h, &shot.path);
-            }
-            event_loop.exit();
-            return true;
-        }
-        false
-    }
-}
-
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-        let entry = &self.registry[self.scene_idx];
-        let attrs = Window::default_attributes().with_title(format!("Voxel Dioramas — {}", entry.id));
-        #[cfg(not(target_arch = "wasm32"))]
-        let attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(1440.0, 900.0));
-        #[cfg(target_arch = "wasm32")]
-        let attrs = {
-            use winit::platform::web::WindowAttributesExtWebSys;
-            attrs.with_canvas(Some(platform::web::canvas())).with_prevent_default(true)
-        };
-        let win = Arc::new(event_loop.create_window(attrs).unwrap());
-        self.window = Some(win.clone());
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.request_scene(self.scene_idx);
-            let scene = self.pending_scene.borrow_mut().take().unwrap();
-            let mut state = pollster::block_on(GpuState::new(win, scene));
-            if self.run_offscreen_jobs(&mut state, event_loop) {
-                return;
-            }
-            *self.pending_state.borrow_mut() = Some(state);
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.loading = true;
-            let slot = self.pending_state.clone();
-            let build = entry.build;
-            let id = entry.id;
-            wasm_bindgen_futures::spawn_local(async move {
-                platform::status(&format!("Generating {id}..."));
-                platform::web::yield_to_browser().await;
-                let scene = build();
-                platform::status("Starting the GPU...");
-                platform::web::yield_to_browser().await;
-                let state = GpuState::new(win.clone(), scene).await;
-                *slot.borrow_mut() = Some(state);
-                win.request_redraw();
-            });
-        }
-    }
-
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        if let WindowEvent::RedrawRequested = event {
-            self.pump();
-        }
+    /// Default camera / global keys (when the experience allows it).
+    fn default_controls(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
         if let WindowEvent::Touch(t) = event {
             self.on_touch(t);
             return;
         }
-        // Keys that need &mut self (scene switching) are handled first.
         if let WindowEvent::KeyboardInput {
             event: KeyEvent { physical_key: PhysicalKey::Code(code), state: ElementState::Pressed, repeat: false, .. },
             ..
@@ -327,9 +393,6 @@ impl ApplicationHandler for App {
         }
         let Some(s) = self.state.as_mut() else { return };
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(sz) => s.resize(sz.width, sz.height),
-            WindowEvent::RedrawRequested => s.render(),
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
                 match button {
@@ -383,7 +446,6 @@ impl ApplicationHandler for App {
                     _ => {}
                 }
             }
-            WindowEvent::Focused(false) => s.cam.keys = Default::default(),
             WindowEvent::KeyboardInput {
                 event: KeyEvent { physical_key: PhysicalKey::Code(code), state: ElementState::Pressed, .. },
                 ..
@@ -405,6 +467,132 @@ impl ApplicationHandler for App {
                 _ => {}
             },
             _ => {}
+        }
+        let _ = event_loop;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_offscreen_jobs(&mut self, state: &mut GpuState, event_loop: &ActiveEventLoop) -> bool {
+        if self.opts.bench {
+            let (w, h) = self.opts.shot_size;
+            let n = state.preset_count();
+            let mut total = 0.0;
+            println!("Benchmark {w}x{h}, 200 frames per view (no vsync):");
+            for p in 0..n {
+                state.set_preset(p);
+                let (mean, p95) = state.bench(200, w, h);
+                total += mean;
+                println!("  {:<20} mean {mean:6.2} ms  p95 {p95:6.2} ms  ({:.0} fps)", state.cam.preset_name, 1000.0 / mean);
+            }
+            println!("  average over views: {:.2} ms ({:.0} fps)", total / n as f32, 1000.0 * n as f32 / total);
+            event_loop.exit();
+            return true;
+        }
+        if !self.opts.shots.is_empty() {
+            let (w, h) = self.opts.shot_size;
+            for shot in &self.opts.shots {
+                state.set_preset(shot.preset);
+                if let Some((eye, target)) = shot.view {
+                    state.cam.set_view(eye, target);
+                }
+                state.atmo.clock = match self.opts.hour {
+                    Some(hour) => super::atmosphere::DayClock::Hours { hour, speed: 0.0, real_time: false },
+                    None => super::atmosphere::DayClock::Preset(shot.time_mode % 3),
+                };
+                if let Some(w) = self.opts.weather {
+                    state.atmo.weather = w;
+                    state.atmo.weather_mix = 1.0;
+                }
+                state.capture(shot.t, w, h, &shot.path);
+            }
+            event_loop.exit();
+            return true;
+        }
+        false
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+        let entry = &self.registry[self.scene_idx];
+        let attrs = Window::default_attributes().with_title(format!("Voxel Dioramas — {}", entry.title));
+        #[cfg(not(target_arch = "wasm32"))]
+        let attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(1440.0, 900.0));
+        #[cfg(target_arch = "wasm32")]
+        let attrs = {
+            use winit::platform::web::WindowAttributesExtWebSys;
+            attrs.with_canvas(Some(platform::web::canvas())).with_prevent_default(true)
+        };
+        let win = Arc::new(event_loop.create_window(attrs).unwrap());
+        self.window = Some(win.clone());
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.request_scene(self.scene_idx, self.params);
+            let (_, _, scene) = self.pending_scene.borrow_mut().take().unwrap();
+            let mut state = pollster::block_on(GpuState::new(win, scene));
+            if self.run_offscreen_jobs(&mut state, event_loop) {
+                return;
+            }
+            *self.pending_state.borrow_mut() = Some(state);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.loading = true;
+            let slot = self.pending_state.clone();
+            let build = entry.build;
+            let title = entry.title;
+            let params = self.params;
+            wasm_bindgen_futures::spawn_local(async move {
+                platform::status(&format!("Generating {title}..."));
+                platform::web::yield_to_browser().await;
+                let scene = build(&params);
+                platform::status("Starting the GPU...");
+                platform::web::yield_to_browser().await;
+                let state = GpuState::new(win.clone(), scene).await;
+                *slot.borrow_mut() = Some(state);
+                win.request_redraw();
+            });
+        }
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        match &event {
+            WindowEvent::RedrawRequested => return self.frame(),
+            WindowEvent::CloseRequested => return event_loop.exit(),
+            WindowEvent::Resized(sz) => {
+                if let Some(s) = self.state.as_mut() {
+                    s.resize(sz.width, sz.height);
+                }
+            }
+            WindowEvent::Focused(false) => {
+                if let Some(s) = self.state.as_mut() {
+                    s.cam.keys = Default::default();
+                }
+            }
+            _ => {}
+        }
+        // 1. The UI gets first pick.
+        if let (Some(ui), Some(w)) = (self.ui.as_mut(), self.window.as_ref()) {
+            let consumed = ui.on_event(w, &event);
+            let pointer_on_ui = ui.wants_pointer()
+                && matches!(event, WindowEvent::MouseInput { state: ElementState::Pressed, .. } | WindowEvent::MouseWheel { .. })
+                || matches!(&event, WindowEvent::Touch(t) if t.phase == TouchPhase::Started && ui.wants_pointer());
+            let typing = ui.wants_keyboard() && matches!(event, WindowEvent::KeyboardInput { .. });
+            if consumed || pointer_on_ui || typing {
+                return;
+            }
+        }
+        // 2. Then the experience.
+        if self.state.is_some() && self.with_ctx(0.0, |e, c| e.window_event(&event, c)).unwrap_or(false) {
+            return;
+        }
+        // 3. Then the default camera controls.
+        if self.exp.free_camera() {
+            self.default_controls(event_loop, event);
         }
     }
 
@@ -468,6 +656,24 @@ pub fn parse_args(registry: &[SceneEntry]) -> Result<RunOptions, String> {
                 let (w, h) = v.split_once('x').ok_or("--size needs WxH")?;
                 opts.shot_size = (w.parse().map_err(|_| "bad width")?, h.parse().map_err(|_| "bad height")?);
             }
+            "--seed" => {
+                opts.params.seed = args.next().ok_or("--seed needs a number")?.parse().map_err(|_| "bad seed")?;
+            }
+            "--season" => {
+                let v = args.next().ok_or("--season needs spring|summer|autumn|winter")?;
+                opts.params.season = super::scene::Season::ALL
+                    .into_iter()
+                    .find(|s| s.name().eq_ignore_ascii_case(&v))
+                    .ok_or(format!("unknown season {v}"))?;
+            }
+            "--weather" => {
+                let v = args.next().ok_or("--weather needs a name")?;
+                opts.weather = Some(
+                    super::atmosphere::Weather::ALL.into_iter().find(|w| w.name().eq_ignore_ascii_case(&v)).ok_or(format!("unknown weather {v}"))?,
+                );
+            }
+            "--hour" => opts.hour = Some(args.next().ok_or("--hour needs 0-24")?.parse().map_err(|_| "bad hour")?),
+            "--mode" => opts.experience = Some(args.next().ok_or("--mode needs an experience id")?),
             "--bench" => opts.bench = true,
             "--list" => {
                 for e in registry {
@@ -489,11 +695,14 @@ pub fn parse_args(registry: &[SceneEntry]) -> Result<RunOptions, String> {
     Ok(opts)
 }
 
-pub fn run(registry: &'static [SceneEntry], opts: RunOptions) {
+pub fn run(registry: &'static [SceneEntry], experiences: &'static [ExperienceEntry], opts: RunOptions) {
     let event_loop = EventLoop::new().unwrap();
+    let exp_idx = opts.experience.as_deref().and_then(|id| experiences.iter().position(|e| e.id == id)).unwrap_or(0);
     let app = App {
         registry,
+        experiences,
         scene_idx: opts.scene_idx,
+        params: opts.params,
         opts,
         window: None,
         state: None,
@@ -501,6 +710,14 @@ pub fn run(registry: &'static [SceneEntry], opts: RunOptions) {
         pending_scene: Rc::new(RefCell::new(None)),
         loading: false,
         touches: Touches::default(),
+        ui: None,
+        shell_expanded: false,
+        exp_idx,
+        exp: (experiences[exp_idx].make)(),
+        exp_started: false,
+        storage: Storage::new(),
+        requests: Requests::default(),
+        toast: None,
     };
     #[cfg(not(target_arch = "wasm32"))]
     {
