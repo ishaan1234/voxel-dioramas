@@ -1,5 +1,7 @@
 # Voxel Dioramas — wgpu
 
+**▶ Play in your browser: https://ishaan1234.github.io/voxel-dioramas/** (WebGPU: Safari 26+, Chrome, Edge)
+
 A native Rust + wgpu 30 + WGSL engine for micro-voxel dioramas, with several
 fully procedural scenes. Forked from
 [hakergeniusz/sakura-temple-wgpu](https://github.com/hakergeniusz/sakura-temple-wgpu)
