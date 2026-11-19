@@ -298,10 +298,6 @@ impl GpuState {
         self.update_title(0);
     }
 
-    pub fn scene_data(&self) -> &super::scene::SceneData {
-        self.sg.scene.data()
-    }
-
     pub fn set_preset(&mut self, idx: usize) {
         let d = self.sg.scene.data();
         self.cam.set_preset(d, idx);

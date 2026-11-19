@@ -11,7 +11,7 @@ use super::kit::*;
 use super::landmarks::{
     build_bell_tower, build_ceremonial_staircase, build_cliff_stilt_temple, build_covered_bridge,
     build_golden_hall, build_grand_taiko_bridge, build_harbor_pier, build_island_deck,
-    build_nandaimon_gate, build_seven_tier_pagoda, build_unit_box_mesh, build_watermill_house,
+    build_nandaimon_gate, build_seven_tier_pagoda, build_watermill_house,
 };
 use super::terrain::{is_water_body, make_senbon_curve, river_z, TerrainGrid, GRID_N};
 use super::*;

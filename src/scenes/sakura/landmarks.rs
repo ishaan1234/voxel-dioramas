@@ -1,46 +1,5 @@
 use super::kit::*;
 
-pub fn build_unit_box_mesh(
-    w: f32,
-    h: f32,
-    d: f32,
-    mat_id: u32,
-    hex_col: u32,
-    colors: &mut ColorCache,
-) -> MeshData {
-    let hw = w * 0.5;
-    let hh = h * 0.5;
-    let hd = d * 0.5;
-    let rgb = colors.get(hex_col);
-    let faces: [([f32; 3], [[f32; 3]; 4], f32); 6] = [
-        ([0.0, 0.0, 1.0], [[-hw, -hh, hd], [hw, -hh, hd], [hw, hh, hd], [-hw, hh, hd]], 0.96),
-        ([0.0, 0.0, -1.0], [[hw, -hh, -hd], [-hw, -hh, -hd], [-hw, hh, -hd], [hw, hh, -hd]], 0.89),
-        ([1.0, 0.0, 0.0], [[hw, -hh, hd], [hw, -hh, -hd], [hw, hh, -hd], [hw, hh, hd]], 0.94),
-        ([-1.0, 0.0, 0.0], [[-hw, -hh, -hd], [-hw, -hh, hd], [-hw, hh, hd], [-hw, hh, -hd]], 0.91),
-        ([0.0, 1.0, 0.0], [[-hw, hh, hd], [hw, hh, hd], [hw, hh, -hd], [-hw, hh, -hd]], 1.00),
-        ([0.0, -1.0, 0.0], [[-hw, -hh, -hd], [hw, -hh, -hd], [hw, -hh, hd], [-hw, -hh, hd]], 0.78),
-    ];
-    let mut mesh = MeshData::default();
-    for (norm, pts, shade) in faces {
-        let bv = mesh.vertices.len() as u32;
-        let col = if mat_id == MAT_LAMP as u32 {
-            rgb
-        } else {
-            [rgb[0] * shade, rgb[1] * shade, rgb[2] * shade]
-        };
-        for pos in pts {
-            mesh.vertices.push(VoxelVertex {
-                pos,
-                norm,
-                color: col,
-                mat_id,
-            });
-        }
-        mesh.indices.extend_from_slice(&[bv, bv + 1, bv + 2, bv, bv + 2, bv + 3]);
-    }
-    mesh
-}
-
 pub fn build_seven_tier_pagoda(colors: &mut ColorCache) -> (MeshData, u64) {
     let s = 0.25;
     let mut vol = MicroVoxelVolume::new(96, 224, 96, s, -48, 0, -48);
