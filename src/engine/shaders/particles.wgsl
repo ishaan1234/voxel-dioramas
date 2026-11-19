@@ -3,6 +3,8 @@ struct SimParams {
     time: f32,
     count: u32,
     paused: u32,
+    bmin: vec4<f32>,
+    bmax: vec4<f32>,
 };
 
 struct Petal {
@@ -28,11 +30,12 @@ fn cs_petals(@builtin(global_invocation_id) gid: vec3<u32>) {
     p.pos_spin.z += (wind_z + cos(sim.time * 1.7 + phase) * 0.55) * sim.dt;
     p.pos_spin.w += (1.2 + sin(phase) * 1.6) * sim.dt;
 
-    if (p.pos_spin.y < 8.0) { p.pos_spin.y = 74.0 + f32(idx % 9u); }
-    if (p.pos_spin.x > 200.0) { p.pos_spin.x -= 400.0; }
-    if (p.pos_spin.x < -200.0) { p.pos_spin.x += 400.0; }
-    if (p.pos_spin.z > 200.0) { p.pos_spin.z -= 400.0; }
-    if (p.pos_spin.z < -200.0) { p.pos_spin.z += 400.0; }
+    let ext = sim.bmax.xyz - sim.bmin.xyz;
+    if (p.pos_spin.y < sim.bmin.y) { p.pos_spin.y = sim.bmax.y + f32(idx % 9u); }
+    if (p.pos_spin.x > sim.bmax.x) { p.pos_spin.x -= ext.x; }
+    if (p.pos_spin.x < sim.bmin.x) { p.pos_spin.x += ext.x; }
+    if (p.pos_spin.z > sim.bmax.z) { p.pos_spin.z -= ext.z; }
+    if (p.pos_spin.z < sim.bmin.z) { p.pos_spin.z += ext.z; }
 
     petals[idx] = p;
 }
@@ -42,6 +45,8 @@ struct CamUniform {
     view_proj: mat4x4<f32>,
     cam_pos: vec4<f32>,   // xyz = cam, w = fog_density
     fog_col: vec4<f32>,   // rgb = linear fog, w = exposure
+    size: vec4<f32>,      // xyz = particle half-size, w = glow multiplier
+    colors: array<vec4<f32>, 4>, // sRGB palette
 };
 @group(0) @binding(0) var<uniform> cam: CamUniform;
 
@@ -61,19 +66,16 @@ struct POut {
 fn vs_petal(in: PIn) -> POut {
     let s = sin(in.p_pos_spin.w);
     let c = cos(in.p_pos_spin.w);
-    let p = in.v_pos * vec3<f32>(0.26, 0.05, 0.26);
+    let p = in.v_pos * cam.size.xyz;
     let rx = vec3<f32>(p.x * c + p.z * s, p.y * c - p.z * s * 0.4, -p.x * s + p.z * c);
     let wpos = rx + in.p_pos_spin.xyz;
 
     let ci = u32(in.p_vel_col.w);
-    var col = vec3<f32>(1.0, 0.718, 0.773);
-    if (ci == 1u) { col = vec3<f32>(1.0, 0.620, 0.710); }
-    else if (ci == 2u) { col = vec3<f32>(1.0, 0.820, 0.863); }
-    else if (ci == 3u) { col = vec3<f32>(1.0, 0.753, 0.796); }
+    let col = cam.colors[min(ci, 3u)].rgb;
 
     var out: POut;
     out.clip = cam.view_proj * vec4<f32>(wpos, 1.0);
-    out.color = pow(col, vec3<f32>(2.2));
+    out.color = pow(col, vec3<f32>(2.2)) * cam.size.w;
     out.world_pos = wpos;
     return out;
 }

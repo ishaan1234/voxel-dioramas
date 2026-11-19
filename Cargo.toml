@@ -1,5 +1,5 @@
 [package]
-name = "sakura-temple-wgpu"
+name = "voxel-dioramas"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
@@ -10,3 +10,4 @@ winit = "0.30"
 glam = { version = "0.33", features = ["bytemuck"] }
 bytemuck = { version = "1.25", features = ["derive"] }
 pollster = "1.0"
+png = "0.18"

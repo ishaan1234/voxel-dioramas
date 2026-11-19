@@ -11,6 +11,7 @@ struct Uniforms {
     sun_col: vec4<f32>,      // rgb = linear sun, w = win_emissive
     hemi_sky: vec4<f32>,     // rgb = linear hemi sky, w = lamp_emissive
     hemi_gnd: vec4<f32>,     // rgb = linear hemi gnd, w = unused
+    extra: vec4<f32>,        // rgb = point light colour, w = star intensity
     point_lights: array<vec4<f32>, 12>,
 };
 
@@ -50,6 +51,17 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     // Subtle sun / moon halo
     let sdot = max(dot(dir, normalize(u.sun_dir.xyz)), 0.0);
     col += u.sun_col.rgb * pow(sdot, 96.0) * 0.45 * u.sky_mid.w;
+
+    // Procedural star field: hash a direction lattice, keep the rare bright cells.
+    if (u.extra.w > 0.0 && h > -0.05) {
+        let g = dir * 420.0;
+        let cell = floor(g);
+        let r = fract(sin(dot(cell, vec3<f32>(12.9898, 78.233, 37.719))) * 43758.5453);
+        let f = fract(g) - vec3<f32>(0.5);
+        let star = step(0.9975, r) * smoothstep(0.42, 0.0, length(f));
+        let twinkle = 0.65 + 0.35 * sin(u.cam_pos.w * 2.3 + r * 917.0);
+        col += vec3<f32>(0.85, 0.9, 1.0) * star * twinkle * u.extra.w * smoothstep(-0.05, 0.25, h);
+    }
     return vec4<f32>(aces_tonemap(col), 1.0);
 }
 
@@ -174,7 +186,7 @@ fn shade_common(in: VOut, alpha: f32) -> vec4<f32> {
             let dist = sqrt(d2);
             let att = pow(1.0 - dist / pl.w, 2.0);
             let p_ndotl = max(dot(n, diff / max(dist, 0.001)), 0.18);
-            lit += in.color * vec3<f32>(1.0, 0.38, 0.04) * (point_int * 0.14 * att * p_ndotl);
+            lit += in.color * u.extra.rgb * (point_int * 0.14 * att * p_ndotl);
         }
     }
 

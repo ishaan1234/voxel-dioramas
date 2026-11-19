@@ -1,5 +1,5 @@
 use glam::Vec3;
-use crate::voxel::{
+use super::kit::{
     fbm2, hash2, noise2, pal, ridged2, CatmullRomCurve3, ColorCache, MeshData, VoxelVertex,
     MAT_MATTE, MAT_WATER,
 };
