@@ -3,10 +3,12 @@
 
 use crate::engine::app::SceneEntry;
 
+pub mod arctic;
 pub mod sakura;
 pub mod sky_islands;
 
 pub static REGISTRY: &[SceneEntry] = &[
     SceneEntry { id: "sky-islands", title: "Sky Islands", build: sky_islands::build },
     SceneEntry { id: "sakura", title: "Sakura Empire", build: sakura::build },
+    SceneEntry { id: "arctic", title: "Aurora Village", build: arctic::build },
 ];
