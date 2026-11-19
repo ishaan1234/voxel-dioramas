@@ -5,7 +5,14 @@
 use crate::engine::experience::ExperienceEntry;
 
 pub mod explore;
+pub mod photo;
 
 pub static REGISTRY: &[ExperienceEntry] = &[
     ExperienceEntry { id: "explore", title: "Explore", blurb: "Fly around freely.", make: explore::make },
+    ExperienceEntry {
+        id: "photo",
+        title: "Photo Hunt",
+        blurb: "Frame landmarks in the right light, weather, and distance.",
+        make: photo::make,
+    },
 ];
