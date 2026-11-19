@@ -7,12 +7,14 @@ use std::f32::consts::{PI, TAU};
 use super::bridges::BridgeSpec;
 use super::effects::{self, Islet};
 use super::flora::build_flora;
+use super::flowers;
 use super::island::{islet_spec, IslandSpec, Lake};
 use super::observatory::{self, ARMILLARY_Y};
 use super::pal;
 use super::*;
 
 pub const HERO: usize = 0;
+const GRASS_PALETTES: [[u32; 3]; 4] = [pal::GRASS_SPRING, pal::GRASS_MEADOW, pal::GRASS_AUTUMN, pal::GRASS_MINT];
 pub const SPIRIT: usize = 1;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -181,7 +183,7 @@ impl SkyIslands {
         // ---- Heavy geometry, generated in parallel ------------------------------
         let compile = |v: MicroVoxelVolume| -> (MeshData, u64) { v.compile(&mut ColorCache::new()) };
         let hero = &islands[HERO];
-        let (island_meshes, sea, obs, bridge_meshes, kit, rings, orb, islet_meshes, bird) = std::thread::scope(|sc| {
+        let (island_meshes, sea, obs, bridge_meshes, kit, rings, orb, islet_meshes, bird, flower_meshes, tuft_meshes) = std::thread::scope(|sc| {
             let isl = sc.spawn(|| {
                 let jobs: Vec<usize> = (0..islands.len()).collect();
                 par_map(&jobs, |&i| {
@@ -203,6 +205,15 @@ impl SkyIslands {
                 par_map(&jobs, |&k| compile(islet_specs[k].voxelize(&islet_stal[k]).0))
             });
             let bird = sc.spawn(|| effects::build_bird(&mut ColorCache::new()));
+            let fl = sc.spawn(|| {
+                let jobs: Vec<usize> = (0..flowers::VARIANTS.len()).collect();
+                let jobs: Vec<(usize, f32)> = jobs.iter().flat_map(|&i| flowers::LOD_SCALES.map(|s| (i, s))).collect();
+                par_map(&jobs, |&(i, s)| flowers::build_flower(flowers::VARIANTS[i], 900 + i as u32, s, &mut ColorCache::new()))
+            });
+            let tufts = sc.spawn(|| {
+                let jobs: Vec<([u32; 3], f32)> = GRASS_PALETTES.iter().flat_map(|&g| flowers::LOD_SCALES.map(|s| (g, s))).collect();
+                par_map(&jobs, |&(g, s)| flowers::build_grass_tuft(g, 77, s, &mut ColorCache::new()))
+            });
             (
                 isl.join().unwrap(),
                 sea.join().unwrap(),
@@ -213,6 +224,8 @@ impl SkyIslands {
                 orb.join().unwrap(),
                 islet_m.join().unwrap(),
                 bird.join().unwrap(),
+                fl.join().unwrap(),
+                tufts.join().unwrap(),
             )
         });
 
@@ -239,6 +252,51 @@ impl SkyIslands {
         let spirit_base = spirit.center + Vec3::Y * (spirit.top_y(0.0, 0.0) - 0.3);
         let span = sb.push_mesh(&kit.spirit_tree);
         sb.add_static(span, &[ModelInstance::from_trs(spirit_base, 0.4, Vec3::ONE)], Pass::Opaque);
+
+        // Wildflower clumps on every island meadow.
+        let mut flower_buckets: Vec<Vec<ModelInstance>> = vec![Vec::new(); flowers::VARIANTS.len()];
+        for spec in &islands {
+            for (p, h) in spec.flower_spots() {
+                let w = spec.center + p;
+                // Species come in patches (low-frequency noise), nudged by the spot hash.
+                let v = fbm2(w.x * 0.06 + 3.0, w.z * 0.06 - 7.0, 2);
+                let variant = ((v * 2.2 + h * 0.45) * flower_buckets.len() as f32) as usize % flower_buckets.len();
+                let n = 1 + (h * 97.0) as usize % 3;
+                for k in 0..n {
+                    let a = h * 61.0 + k as f32 * 2.4;
+                    let r = if k == 0 { 0.0 } else { 0.1 + 0.07 * k as f32 };
+                    let pos = w + Vec3::new(a.cos() * r, 0.0, a.sin() * r);
+                    let scale = 1.15 + (h * 31.0 + k as f32 * 0.37).fract() * 0.5;
+                    flower_buckets[variant].push(ModelInstance::from_trs(pos, h * 50.0 + k as f32, Vec3::splat(scale)));
+                }
+            }
+        }
+        let n_lod = flowers::LOD_SCALES.len();
+        let add_lods = |sb: &mut SceneBuilder, meshes: &[(MeshData, u64)], list: Vec<ModelInstance>| {
+            sb.total_voxels += meshes[0].1;
+            let lods = meshes.iter().zip(flowers::LOD_DIST).map(|((m, _), d)| (sb.push_mesh(m), d)).collect();
+            sb.add_detail(lods, list, 0.6);
+        };
+        let flower_tris: usize = flower_meshes.chunks(n_lod).zip(&flower_buckets).map(|(m, l)| m[0].0.tri_count() * l.len()).sum();
+        let flower_count: usize = flower_buckets.iter().map(Vec::len).sum();
+        for (meshes, list) in flower_meshes.chunks(n_lod).zip(flower_buckets) {
+            add_lods(&mut sb, meshes, list);
+        }
+        // Grass clumps, tinted to match each island's grass palette.
+        let mut tuft_buckets: Vec<Vec<ModelInstance>> = vec![Vec::new(); GRASS_PALETTES.len()];
+        for spec in &islands {
+            let pi = GRASS_PALETTES.iter().position(|g| *g == spec.grass).unwrap_or(0);
+            for (p, h) in spec.tuft_spots() {
+                let scale = 0.9 + (h * 17.0).fract() * 0.6;
+                tuft_buckets[pi].push(ModelInstance::from_trs(spec.center + p, h * 40.0, Vec3::splat(scale)));
+            }
+        }
+        let tuft_count: usize = tuft_buckets.iter().map(Vec::len).sum();
+        let tuft_tris: usize = tuft_meshes.chunks(n_lod).zip(&tuft_buckets).map(|(m, l)| m[0].0.tri_count() * l.len()).sum();
+        for (meshes, list) in tuft_meshes.chunks(n_lod).zip(tuft_buckets) {
+            add_lods(&mut sb, meshes, list);
+        }
+        println!("Flowers: {flower_count} plants ({flower_tris} tris); grass: {tuft_count} clumps ({tuft_tris} tris)");
 
         // Dynamic batches: order must match update_dynamic_instances.
         for (m, c) in rings.iter().chain(std::iter::once(&orb)) {
@@ -295,6 +353,7 @@ impl SkyIslands {
             dynamic_inst_count: geo.dynamic_inst_count,
             total_voxels: geo.total_voxels,
             total_tris: geo.total_tris,
+            detail: geo.detail,
             presets: views,
             tour_pos,
             tour_look,

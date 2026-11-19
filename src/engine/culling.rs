@@ -111,6 +111,7 @@ pub fn visible(planes: &[Vec4; 6], s: &Option<Sphere>) -> bool {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3,7 +3,31 @@ use std::f32::consts::{PI, TAU};
 
 use super::scene::SceneData;
 
+/// Movement keys currently held (WASD / QE / Shift / arrows).
+#[derive(Default, Clone, Copy)]
+pub struct MoveKeys {
+    pub forward: bool,
+    pub back: bool,
+    pub left: bool,
+    pub right: bool,
+    pub up: bool,
+    pub down: bool,
+    pub fast: bool,
+    pub turn_left: bool,
+    pub turn_right: bool,
+    pub look_up: bool,
+    pub look_down: bool,
+}
+
+impl MoveKeys {
+    fn any(&self) -> bool {
+        self.forward || self.back || self.left || self.right || self.up || self.down
+            || self.turn_left || self.turn_right || self.look_up || self.look_down
+    }
+}
+
 pub struct OrbitCam {
+    pub keys: MoveKeys,
     pub target: Vec3,
     pub yaw: f32,
     pub pitch: f32,
@@ -28,6 +52,7 @@ impl OrbitCam {
     pub fn new(scene: &SceneData) -> Self {
         let p0 = &scene.presets[0];
         let mut c = Self {
+            keys: MoveKeys::default(),
             target: p0.target,
             yaw: 0.0,
             pitch: 0.0,
@@ -88,6 +113,21 @@ impl OrbitCam {
         }
     }
 
+    /// Snap to an explicit eye / target (used by `--view` screenshots).
+    pub fn set_view(&mut self, eye: Vec3, target: Vec3) {
+        self.tour = false;
+        self.preset_name = "Custom";
+        let d = eye - target;
+        self.target = target;
+        self.dist = d.length().clamp(0.5, self.max_dist);
+        self.pitch = (d.y / self.dist).asin();
+        self.yaw = d.x.atan2(d.z);
+        self.goal_target = self.target;
+        self.goal_dist = self.dist;
+        self.goal_pitch = self.pitch;
+        self.goal_yaw = self.yaw;
+    }
+
     /// When leaving the tour, continue orbiting from where the tour camera was.
     fn adopt_tour_view(&mut self) {
         let d = self.tour_pos_actual - self.tour_tgt_actual;
@@ -108,8 +148,30 @@ impl OrbitCam {
         }
     }
 
+    /// Apply held keys to the goals: WASD moves the look-at point across the
+    /// ground plane relative to the view, Q/E lower/raise it, arrows turn.
+    fn apply_keys(&mut self, dt: f32) {
+        let k = self.keys;
+        if !k.any() {
+            return;
+        }
+        self.leave_tour();
+        let speed = (self.goal_dist * 0.55).max(8.0) * if k.fast { 3.0 } else { 1.0 } * dt;
+        // The camera looks along -(sin yaw, cos yaw) on the ground plane.
+        let fwd = -Vec3::new(self.goal_yaw.sin(), 0.0, self.goal_yaw.cos());
+        let right = Vec3::new(-fwd.z, 0.0, fwd.x);
+        let axis = |pos: bool, neg: bool| (pos as i32 - neg as i32) as f32;
+        self.goal_target += fwd * (axis(k.forward, k.back) * speed)
+            + right * (axis(k.right, k.left) * speed)
+            + Vec3::Y * (axis(k.up, k.down) * speed);
+        let turn = 1.6 * dt * if k.fast { 2.0 } else { 1.0 };
+        self.goal_yaw += axis(k.turn_left, k.turn_right) * turn;
+        self.goal_pitch = (self.goal_pitch + axis(k.look_up, k.look_down) * turn).clamp(self.min_pitch, 1.48);
+    }
+
     /// Ease the orbit camera toward its goals (frame-rate independent).
     pub fn advance(&mut self, dt: f32) {
+        self.apply_keys(dt);
         let k = 1.0 - (-14.0 * dt).exp();
         self.target = self.target.lerp(self.goal_target, k);
         self.yaw += (self.goal_yaw - self.yaw) * k;
@@ -163,5 +225,67 @@ impl OrbitCam {
     pub fn zoom(&mut self, scroll: f32) {
         self.leave_tour();
         self.goal_dist = (self.goal_dist * (1.0 - scroll * 0.12)).clamp(6.0, self.max_dist);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cam_looking(eye: Vec3, target: Vec3) -> OrbitCam {
+        let mut c = OrbitCam {
+            keys: MoveKeys::default(),
+            target,
+            yaw: 0.0,
+            pitch: 0.0,
+            dist: 10.0,
+            max_dist: 500.0,
+            min_pitch: -1.2,
+            tour: false,
+            tour_t: 0.0,
+            tour_pos_actual: eye,
+            tour_tgt_actual: target,
+            preset_name: "test",
+            goal_target: target,
+            goal_yaw: 0.0,
+            goal_pitch: 0.0,
+            goal_dist: 10.0,
+        };
+        c.set_view(eye, target);
+        c
+    }
+
+    #[test]
+    fn wasd_moves_relative_to_view() {
+        // Looking from +Z toward the origin, i.e. along -Z.
+        let mut c = cam_looking(Vec3::new(0.0, 5.0, 20.0), Vec3::ZERO);
+        let start_eye = c.eye();
+        c.keys.forward = true;
+        for _ in 0..60 {
+            c.advance(1.0 / 60.0);
+        }
+        c.keys.forward = false;
+        for _ in 0..120 {
+            c.advance(1.0 / 60.0); // let the smoothing settle
+        }
+        assert!(c.target.z < -1.0, "W should move toward -Z, got {:?}", c.target);
+        assert!(c.eye().z < start_eye.z);
+        let z = c.target.z;
+        c.keys.right = true;
+        for _ in 0..60 {
+            c.advance(1.0 / 60.0);
+        }
+        assert!(c.target.x > 1.0, "D should move toward +X, got {:?}", c.target);
+        assert!((c.target.z - z).abs() < 0.5, "strafing should not move forward");
+    }
+
+    #[test]
+    fn settled_camera_does_not_drift() {
+        let mut c = cam_looking(Vec3::new(30.0, 20.0, 40.0), Vec3::new(1.0, 2.0, 3.0));
+        let e = c.eye();
+        for _ in 0..1000 {
+            c.advance(1.0 / 60.0);
+        }
+        assert_eq!(c.eye(), e);
     }
 }

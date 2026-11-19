@@ -283,8 +283,18 @@ pub fn build_bell_tower(colors: &mut ColorCache) -> (MeshData, u64) {
 
 pub fn build_nandaimon_gate(colors: &mut ColorCache) -> (MeshData, u64) {
     let s = 0.25;
-    let mut vol = MicroVoxelVolume::new(88, 72, 48, s, -44, 0, -24);
+    let mut vol = MicroVoxelVolume::new(88, 72, 56, s, -44, 0, -28);
     vol.box_fill(-38, 0, -18, 38, 3, 18, MAT_MATTE, pal::STONE_MID);
+    // Three-step approach on both faces of the 1 m plinth (step k is k+1 voxels
+    // tall and (3-k)*2 voxels deep), matching the 12 m-wide ceremonial stairs.
+    for dir in [-1, 1] {
+        for k in 0..3 {
+            let depth = (3 - k) * 2;
+            vol.box_fn(-24, 0, dir * 19, 24, k, dir * (18 + depth), MAT_MATTE, |x, y, _| {
+                if y == k && (x + k).rem_euclid(4) == 0 { pal::COURTYARD } else if y == k { pal::STONE_LT } else { pal::STONE_DARK }
+            });
+        }
+    }
     for px in [-32, -16, 16, 32] {
         for pz in [-12, 0, 12] {
             vol.box_fill(px - 2, 3, pz - 2, px + 2, 4, pz + 2, MAT_MATTE, pal::STONE_DARK);

@@ -50,6 +50,10 @@ pub struct IslandSpec {
 }
 
 const WATER_Y: f32 = -0.3;
+/// Fraction of meadow cells that grow a flower clump.
+const FLOWER_HASH: f32 = 0.028;
+/// Cells with hash in FLOWER_HASH..TUFT_HASH grow a grass clump.
+const TUFT_HASH: f32 = 0.07;
 
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
@@ -242,26 +246,6 @@ impl IslandSpec {
             });
         }
 
-        // 3. Flowers & grass tufts on top, scattered by a hash (no water, no plaza).
-        let (a, b) = (ox, ox + nx - 1);
-        for iz in a..=b {
-            for ix in a..=b {
-                let (x, z) = ((ix as f32 + 0.5) * s, (iz as f32 + 0.5) * s);
-                if self.e(x, z) >= 0.95 || self.is_water(x, z) || self.on_path(x, z) || (x * x + z * z).sqrt() < self.plaza + 1.5 {
-                    continue;
-                }
-                let h = hash2(x * 1.7 + self.seed, z * 1.3);
-                if h < 0.028 {
-                    let iy = (self.top_y(x, z) / s).floor() as i32 + 1;
-                    let col = pal::FLOWERS[(h * 1000.0) as usize % pal::FLOWERS.len()];
-                    vol.set(ix, iy, iz, MAT_FOLIAGE, col);
-                } else if h < 0.09 {
-                    let iy = (self.top_y(x, z) / s).floor() as i32 + 1;
-                    vol.set(ix, iy, iz, MAT_FOLIAGE, self.grass[2]);
-                }
-            }
-        }
-
         // 4. Lake water surface + waterfall ribbon (translucent volume).
         if self.lake.is_some() {
             let (wlo, whi) = water.local_bounds();
@@ -282,6 +266,44 @@ impl IslandSpec {
             self.pour_waterfall(&mut water, lip, dir);
         }
         (vol, water)
+    }
+
+    /// Meadow cells (not water, path, plaza or rim) get a stable hash in 0..1
+    /// that decides whether they hold a flower clump, a grass clump or nothing.
+    fn meadow_hash(&self, x: f32, z: f32) -> Option<f32> {
+        if self.e(x, z) >= 0.95 || self.is_water(x, z) || self.on_path(x, z) || (x * x + z * z).sqrt() < self.plaza + 1.5 {
+            return None;
+        }
+        Some(hash2(x * 1.7 + self.seed, z * 1.3))
+    }
+
+    /// Local positions (on top of the voxel grass) where flowers grow, plus a
+    /// per-spot hash (0..1) for picking species / clump size.
+    pub fn flower_spots(&self) -> Vec<(Vec3, f32)> {
+        self.meadow_spots(0.0, FLOWER_HASH)
+    }
+
+    /// Local positions for grass-blade clumps (the next band of the same hash).
+    pub fn tuft_spots(&self) -> Vec<(Vec3, f32)> {
+        self.meadow_spots(FLOWER_HASH, TUFT_HASH)
+    }
+
+    fn meadow_spots(&self, lo: f32, hi: f32) -> Vec<(Vec3, f32)> {
+        let s = ISLAND_SCALE;
+        let n = (self.radius * 1.32 / s).ceil() as i32;
+        let mut out = Vec::new();
+        for iz in -n..n {
+            for ix in -n..n {
+                let (x, z) = ((ix as f32 + 0.5) * s, (iz as f32 + 0.5) * s);
+                if let Some(h) = self.meadow_hash(x, z) {
+                    if h >= lo && h < hi {
+                        let y = ((self.top_y(x, z) / s).floor() + 1.0) * s;
+                        out.push((Vec3::new(x, y, z), (h - lo) / (hi - lo)));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Ballistic waterfall: x(t) = lip + dir·v0·t, y(t) = lip.y − g·t²/2,

@@ -72,6 +72,16 @@ pub struct ShadowConfig {
     pub far: f32,
 }
 
+/// Many small instanced props (flowers, grass) drawn with per-instance level
+/// of detail: each instance picks the first LOD whose `max_dist` (metres at
+/// 1080p; scaled with screen height) exceeds its camera distance.
+pub struct DetailSet {
+    pub lods: Vec<(MeshSpan, f32)>,
+    pub instances: Vec<ModelInstance>,
+    /// Bounding radius of one unscaled instance, for frustum tests.
+    pub radius: f32,
+}
+
 /// Fully built, renderer-ready scene data.
 pub struct SceneData {
     pub title: String,
@@ -86,6 +96,8 @@ pub struct SceneData {
     pub dynamic_inst_count: u32,
     pub total_voxels: u64,
     pub total_tris: usize,
+    /// Per-instance LOD props, drawn with the opaque pass.
+    pub detail: Vec<DetailSet>,
     pub presets: Vec<CameraPreset>,
     pub tour_pos: CatmullRomCurve3,
     pub tour_look: CatmullRomCurve3,
@@ -154,6 +166,7 @@ pub struct SceneBuilder {
     translucent: Vec<DrawBatch>,
     dynamic: Vec<PendingDyn>,
     dyn_count: u32,
+    detail: Vec<DetailSet>,
     pub total_voxels: u64,
     pub total_tris: usize,
 }
@@ -166,6 +179,7 @@ pub struct BuiltGeometry {
     pub translucent_batches: Vec<DrawBatch>,
     pub dynamic_inst_start: u32,
     pub dynamic_inst_count: u32,
+    pub detail: Vec<DetailSet>,
     pub total_voxels: u64,
     pub total_tris: usize,
 }
@@ -214,6 +228,15 @@ impl SceneBuilder {
         self.add_static(span, transforms, pass);
     }
 
+    /// Register instanced props with several LOD meshes (finest first).
+    pub fn add_detail(&mut self, lods: Vec<(MeshSpan, f32)>, instances: Vec<ModelInstance>, radius: f32) {
+        if instances.is_empty() || lods.is_empty() {
+            return;
+        }
+        self.total_tris += lods[0].0.tri_count * instances.len();
+        self.detail.push(DetailSet { lods, instances, radius });
+    }
+
     /// Reserve `count` per-frame instances. The scene's `update_dynamic_instances`
     /// must emit them in the same order these calls were made.
     pub fn add_dynamic(&mut self, span: MeshSpan, count: usize, pass: Pass) {
@@ -248,6 +271,7 @@ impl SceneBuilder {
             translucent_batches: self.translucent,
             dynamic_inst_start: base,
             dynamic_inst_count: self.dyn_count,
+            detail: self.detail,
             total_voxels: self.total_voxels,
             total_tris: self.total_tris,
         }

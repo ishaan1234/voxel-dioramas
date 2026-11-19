@@ -7,6 +7,7 @@
 mod bridges;
 mod effects;
 mod flora;
+mod flowers;
 mod island;
 mod layout;
 mod observatory;

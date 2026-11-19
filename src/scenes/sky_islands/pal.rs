@@ -16,7 +16,6 @@ pub const WATER_DEEP: u32 = 0x2a8fb8;
 pub const FALL: u32 = 0x9fe3f2;
 pub const FOAM: u32 = 0xeefcff;
 
-pub const FLOWERS: [u32; 5] = [0xffe066, 0xff8fb1, 0xf7f7ff, 0xb48cff, 0xff9a4d];
 
 pub const CRYSTAL_CYAN: u32 = 0x5ef2ff;
 pub const CRYSTAL_VIOLET: u32 = 0xb58bff;

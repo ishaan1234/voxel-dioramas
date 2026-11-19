@@ -20,6 +20,8 @@ pub struct SceneEntry {
 
 /// One offscreen screenshot request: `--shot preset:time:seconds:path.png`.
 pub struct Shot {
+    /// Explicit (eye, target) overriding the preset, from a preceding `--view`.
+    pub view: Option<(glam::Vec3, glam::Vec3)>,
     pub preset: usize,
     pub time_mode: usize,
     pub t: f32,
@@ -87,6 +89,9 @@ impl ApplicationHandler for App {
             let (w, h) = self.opts.shot_size;
             for shot in &self.opts.shots {
                 state.set_preset(shot.preset);
+                if let Some((eye, target)) = shot.view {
+                    state.cam.set_view(eye, target);
+                }
                 state.time_mode = shot.time_mode % 3;
                 state.capture(shot.t, w, h, &shot.path);
             }
@@ -133,6 +138,29 @@ impl ApplicationHandler for App {
                 };
                 s.cam.zoom(sc);
             }
+            // Held movement keys (press and release).
+            WindowEvent::KeyboardInput {
+                event: KeyEvent { physical_key: PhysicalKey::Code(code), state: ks, .. },
+                ..
+            } if is_move_key(code) => {
+                let down = ks == ElementState::Pressed;
+                let k = &mut s.cam.keys;
+                match code {
+                    KeyCode::KeyW => k.forward = down,
+                    KeyCode::KeyS => k.back = down,
+                    KeyCode::KeyA => k.left = down,
+                    KeyCode::KeyD => k.right = down,
+                    KeyCode::KeyE => k.up = down,
+                    KeyCode::KeyQ => k.down = down,
+                    KeyCode::ShiftLeft | KeyCode::ShiftRight => k.fast = down,
+                    KeyCode::ArrowLeft => k.turn_left = down,
+                    KeyCode::ArrowRight => k.turn_right = down,
+                    KeyCode::ArrowUp => k.look_up = down,
+                    KeyCode::ArrowDown => k.look_down = down,
+                    _ => {}
+                }
+            }
+            WindowEvent::Focused(false) => s.cam.keys = Default::default(),
             WindowEvent::KeyboardInput {
                 event: KeyEvent { physical_key: PhysicalKey::Code(code), state: ElementState::Pressed, .. },
                 ..
@@ -165,9 +193,28 @@ impl ApplicationHandler for App {
     }
 }
 
+fn is_move_key(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::KeyW
+            | KeyCode::KeyA
+            | KeyCode::KeyS
+            | KeyCode::KeyD
+            | KeyCode::KeyQ
+            | KeyCode::KeyE
+            | KeyCode::ShiftLeft
+            | KeyCode::ShiftRight
+            | KeyCode::ArrowLeft
+            | KeyCode::ArrowRight
+            | KeyCode::ArrowUp
+            | KeyCode::ArrowDown
+    )
+}
+
 pub fn parse_args(registry: &[SceneEntry]) -> Result<RunOptions, String> {
     let mut opts = RunOptions { scene_idx: 0, shots: Vec::new(), shot_size: (1600, 900), bench: false };
     let mut args = std::env::args().skip(1);
+    let mut view: Option<(glam::Vec3, glam::Vec3)> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--shot" => {
@@ -183,7 +230,16 @@ pub fn parse_args(registry: &[SceneEntry]) -> Result<RunOptions, String> {
                 let time_mode = num("time")? as usize;
                 let t = num("seconds")?;
                 let path = parts.next().ok_or("missing path in --shot")?.to_string();
-                opts.shots.push(Shot { preset: preset.saturating_sub(1), time_mode, t, path });
+                opts.shots.push(Shot { view, preset: preset.saturating_sub(1), time_mode, t, path });
+            }
+            "--view" => {
+                // --view ex,ey,ez,tx,ty,tz : camera for the following --shot(s)
+                let v = args.next().ok_or("--view needs ex,ey,ez,tx,ty,tz")?;
+                let n: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if n.len() != 6 {
+                    return Err(format!("bad --view {v}"));
+                }
+                view = Some((glam::Vec3::new(n[0], n[1], n[2]), glam::Vec3::new(n[3], n[4], n[5])));
             }
             "--size" => {
                 let v = args.next().ok_or("--size needs WxH")?;

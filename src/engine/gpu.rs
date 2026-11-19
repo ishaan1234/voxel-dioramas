@@ -77,6 +77,10 @@ struct SceneGpu {
     /// Shadow casters: static ones go to the cached map, dynamic ones every frame.
     static_shadow: Vec<DrawBatch>,
     dynamic_shadow: Vec<DrawBatch>,
+    /// Detail props: every instance in a fixed order (for the shadow cache),
+    /// and a per-frame buffer refilled with LOD-sorted visible instances.
+    detail_static_buf: wgpu::Buffer,
+    detail_frame_buf: wgpu::Buffer,
 }
 
 pub struct GpuState {
@@ -95,6 +99,8 @@ pub struct GpuState {
     refresh_shadow: bool,
     vis_opaque: Vec<bool>,
     vis_trans: Vec<bool>,
+    detail_draws: Vec<DrawBatch>,
+    detail_scratch: Vec<ModelInstance>,
     pipes: Pipelines,
 
     main_bg: wgpu::BindGroup,
@@ -250,6 +256,8 @@ impl GpuState {
             refresh_shadow: true,
             vis_opaque: Vec::new(),
             vis_trans: Vec::new(),
+            detail_draws: Vec::new(),
+            detail_scratch: Vec::new(),
             pipes,
             main_bg,
             shadow_bg,
@@ -335,6 +343,21 @@ impl GpuState {
             ],
         });
 
+        let mut detail_all: Vec<ModelInstance> = d.detail.iter().flat_map(|s| s.instances.iter().copied()).collect();
+        if detail_all.is_empty() {
+            detail_all.push(ModelInstance::identity());
+        }
+        let detail_static_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("detail_static"),
+            contents: bytemuck::cast_slice(&detail_all),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let detail_frame_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("detail_frame"),
+            size: (detail_all.len() * std::mem::size_of::<ModelInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         println!(
             "Culling: {} opaque / {} translucent draw clusters; {} static + {} dynamic shadow casters",
             opaque.batches.len(),
@@ -355,6 +378,8 @@ impl GpuState {
             translucent,
             static_shadow,
             dynamic_shadow,
+            detail_static_buf,
+            detail_frame_buf,
         }
     }
 
@@ -403,7 +428,7 @@ impl GpuState {
         let view = if self.cam.tour { "Tour" } else { self.cam.preset_name };
         let pause = if self.paused { " | PAUSED" } else { "" };
         self.window.set_title(&format!(
-            "{} | {mode} | {view}{pause} | {} tris · {} draws · {fps} FPS | [Tab] Scene [1-9] [T] Tour [N] Time [P] Pause",
+            "{} | {mode} | {view}{pause} | {} tris · {} draws · {fps} FPS | [WASD/QE] Move [Tab] Scene [1-9] [T] Tour [N] Time",
             d.title,
             d.total_tris,
             d.total_draws()
@@ -446,6 +471,46 @@ impl GpuState {
         let planes = frustum_planes(vp);
         self.vis_opaque = self.sg.opaque.bounds.iter().map(|b| visible(&planes, b)).collect();
         self.vis_trans = self.sg.translucent.bounds.iter().map(|b| visible(&planes, b)).collect();
+        // Detail props: per-instance frustum test + LOD pick by distance.
+        // Thresholds are tuned for 1080p and scale with the screen height.
+        let lod_k = (self.config.height as f32 / 1080.0).max(0.5);
+        self.detail_draws.clear();
+        self.detail_scratch.clear();
+        for set in &d.detail {
+            let mut near = 0.0;
+            for &(span, max_d) in &set.lods {
+                let far = max_d * lod_k;
+                let start = self.detail_scratch.len() as u32;
+                for m in &set.instances {
+                    let pos = Vec3::new(m.model[3][0], m.model[3][1], m.model[3][2]);
+                    let dist = pos.distance(eye);
+                    if dist < near || dist >= far {
+                        continue;
+                    }
+                    let scale = Vec3::new(m.model[0][0], m.model[0][1], m.model[0][2]).length();
+                    let r = set.radius * scale;
+                    let sphere = Some(crate::engine::culling::Sphere { c: pos + Vec3::Y * r * 0.5, r });
+                    if visible(&planes, &sphere) {
+                        self.detail_scratch.push(*m);
+                    }
+                }
+                let count = self.detail_scratch.len() as u32 - start;
+                if count > 0 {
+                    self.detail_draws.push(DrawBatch {
+                        idx_start: span.idx_start,
+                        idx_count: span.idx_count,
+                        base_vertex: span.base_vertex,
+                        inst_start: start,
+                        inst_count: count,
+                    });
+                }
+                near = far;
+            }
+        }
+        if !self.detail_scratch.is_empty() {
+            self.queue.write_buffer(&self.sg.detail_frame_buf, 0, bytemuck::cast_slice(&self.detail_scratch));
+        }
+
         self.refresh_shadow = self.shadow_key != Some(self.time_mode);
         self.shadow_key = Some(self.time_mode);
 
@@ -539,6 +604,38 @@ impl GpuState {
         };
         if self.refresh_shadow {
             shadow_pass(&mut enc, &self.static_shadow_view, true, &self.sg.static_shadow);
+            // Detail props cast into the cache too, using their middle LOD.
+            let d = self.sg.scene.data();
+            if !d.detail.is_empty() {
+                let mut spass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("detail_shadow"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.static_shadow_view,
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                });
+                spass.set_pipeline(&self.pipes.shadow);
+                spass.set_bind_group(0, &self.shadow_bg, &[]);
+                spass.set_vertex_buffer(0, self.sg.vb.slice(..));
+                spass.set_vertex_buffer(1, self.sg.detail_static_buf.slice(..));
+                spass.set_index_buffer(self.sg.ib.slice(..), wgpu::IndexFormat::Uint32);
+                let mut first = 0u32;
+                for set in &d.detail {
+                    let (span, _) = set.lods[1.min(set.lods.len() - 1)];
+                    let b = DrawBatch {
+                        idx_start: span.idx_start,
+                        idx_count: span.idx_count,
+                        base_vertex: span.base_vertex,
+                        inst_start: first,
+                        inst_count: set.instances.len() as u32,
+                    };
+                    Self::draw_batch(&mut spass, &b);
+                    first += set.instances.len() as u32;
+                }
+            }
         }
         let full = wgpu::Extent3d { width: SHADOW_RES, height: SHADOW_RES, depth_or_array_layers: 1 };
         let tex_info = |t| wgpu::TexelCopyTextureInfo { texture: t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All };
@@ -575,6 +672,12 @@ impl GpuState {
             rpass.set_index_buffer(self.sg.ib.slice(..), wgpu::IndexFormat::Uint32);
             for (b, &v) in self.sg.opaque.batches.iter().zip(&self.vis_opaque) {
                 if v {
+                    Self::draw_batch(&mut rpass, b);
+                }
+            }
+            if !self.detail_draws.is_empty() {
+                rpass.set_vertex_buffer(1, self.sg.detail_frame_buf.slice(..));
+                for b in &self.detail_draws {
                     Self::draw_batch(&mut rpass, b);
                 }
             }

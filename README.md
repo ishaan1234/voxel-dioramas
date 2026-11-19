@@ -37,6 +37,9 @@ toolkit, so new worlds are written as **math**, not hand-placed voxels.
 | Armillary sphere | Three torus SDF rings, each tumbling on its own quaternion axis |
 | Trees | Recursive branching (Rodrigues rotations, tapered capsules) with noise-displaced foliage ellipsoids; pines are stacked SDF cones |
 | Tree placement | Poisson-disc sampling, rejecting water, paths and plazas |
+| Wildflowers | Daisies (polar-repeated petal rings), tulips (shelled ellipsoid cut along a `cos 3θ` rim), poppies, lavender (buds along swept stalks); species grow in fbm-noise patches |
+| Grass clumps | Leaning, tapering blade ellipsoids tinted from each island's palette |
+| Plant LOD | Each plant is the same SDF sampled at 3 / 6 / 12 cm voxels, picked per instance by distance so the coarser voxel stays under ~1.2 px |
 | Footpaths | Distance to a ray with a sine wiggle, tapered to meet each bridge |
 | Cloud sea | Opaque voxel height-field from smoothstepped fbm, so islands cast shadows on it |
 | Birds, islets | Parametric circles with banking; islets reuse the island generator at small radii |
@@ -137,11 +140,15 @@ every scene differ by at most 1/255 per pixel. The optimizations:
 cargo run --release -- sky-islands --size 1920x1080 --shot 1:0:20:overview.png --shot 3:2:20:armillary.png
 ```
 
+`--view ex,ey,ez,tx,ty,tz` sets an explicit camera (eye, then target) for the
+shots that follow it.
+
 `--shot preset:time:seconds:path`: preset is 1–9, time is 0 = day, 1 = sunset /
 golden hour, 2 = night, seconds is the simulation time. You can repeat `--shot`.
 
 ## Controls
 
+- **`W` `A` `S` `D`**: move · **`Q` / `E`**: down / up · **`Shift`**: faster · **Arrow keys**: turn / look
 - **Left-drag**: orbit · **Right-drag**: pan · **Scroll**: zoom
 - **`Tab`** / **`` ` ``**: next / previous scene
 - **`T`** or **`Space`**: toggle the cinematic tour

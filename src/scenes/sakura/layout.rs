@@ -37,6 +37,10 @@ struct TownPlacement {
     rot_y: f32,
 }
 
+/// Gate centre: its front plinth steps (6.25 m ahead of centre) end exactly at
+/// the citadel wall face (z = -24), where the ceremonial stairs arrive.
+const GATE_Z: f32 = -30.25;
+
 #[derive(Copy, Clone)]
 struct MeshSpan {
     idx_start: u32,
@@ -64,7 +68,7 @@ impl SakuraScene {
         grid.register_pad(36.0, -82.0, 16.0, 12.0, 28.0, true);
         grid.register_pad(-14.0, -76.0, 6.0, 6.0, 28.0, true);
         grid.register_pad(10.0, -76.0, 6.0, 6.0, 28.0, true);
-        grid.register_pad(0.0, -28.0, 12.0, 6.0, 22.0, true);
+        grid.register_pad(0.0, GATE_Z, 12.0, 6.0, 22.0, true);
         grid.register_pad(-146.0, -88.0, 9.0, 9.0, 42.0, true);
         grid.register_pad(-116.0, 10.0, 6.0, 6.0, 10.0, true);
 
@@ -204,7 +208,7 @@ impl SakuraScene {
         let (gate_m, c) = build_nandaimon_gate(&mut colors);
         total_voxels += c;
         let sp = push_mesh(&mut vertices, &mut indices, &gate_m);
-        add_static_batch(sp, &[ModelInstance::from_trs(Vec3::new(0.0, 22.0, -28.0), 0.0, Vec3::ONE)]);
+        add_static_batch(sp, &[ModelInstance::from_trs(Vec3::new(0.0, 22.0, GATE_Z), 0.0, Vec3::ONE)]);
 
         let (cliff_m, c) = build_cliff_stilt_temple(&mut colors);
         total_voxels += c;
@@ -710,6 +714,7 @@ impl SakuraScene {
             dynamic_inst_count,
             total_voxels,
             total_tris,
+            detail: Vec::new(),
             presets: presets(),
             tour_pos,
             tour_look,
