@@ -1,5 +1,4 @@
-mod engine;
-mod scenes;
+use dioramas::{engine, scenes};
 
 fn main() {
     match engine::app::parse_args(scenes::REGISTRY) {

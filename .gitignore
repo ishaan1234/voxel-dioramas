@@ -16,3 +16,6 @@ updated.txt
 *.log
 *.tmp
 *.cache
+
+# Web build output
+/dist/

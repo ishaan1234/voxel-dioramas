@@ -1,6 +1,7 @@
 //! Device / surface ownership, per-scene GPU buffers and the frame loop.
 
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
+use web_time::Instant;
 
 use glam::{
     camera::rh::{
@@ -163,16 +164,20 @@ impl GpuState {
             .await
             .unwrap();
 
+        // Shading writes linear colour and relies on an sRGB render target.
+        // Browser canvases usually only offer non-sRGB formats, so render
+        // through an sRGB *view* of the canvas texture in that case.
         let caps = surface.get_capabilities(&adapter);
-        let fmt = caps.formats.iter().find(|f| f.is_srgb()).copied().unwrap_or(caps.formats[0]);
+        let surface_fmt = caps.formats.iter().find(|f| f.is_srgb()).copied().unwrap_or(caps.formats[0]);
+        let fmt = surface_fmt.add_srgb_suffix();
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: fmt,
+            format: surface_fmt,
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
+            view_formats: if fmt != surface_fmt { vec![fmt] } else { vec![] },
             desired_maximum_frame_latency: 2,
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
@@ -427,12 +432,12 @@ impl GpuState {
         let mode = d.time_modes[self.time_mode].name;
         let view = if self.cam.tour { "Tour" } else { self.cam.preset_name };
         let pause = if self.paused { " | PAUSED" } else { "" };
-        self.window.set_title(&format!(
-            "{} | {mode} | {view}{pause} | {} tris · {} draws · {fps} FPS | [WASD/QE] Move [Tab] Scene [1-9] [T] Tour [N] Time",
-            d.title,
-            d.total_tris,
-            d.total_draws()
-        ));
+        #[cfg(not(target_arch = "wasm32"))]
+        let help = " | [WASD/QE] Move [Tab] Scene [1-9] [T] Tour [N] Time";
+        #[cfg(target_arch = "wasm32")]
+        let help = "";
+        let text = format!("{} | {mode} | {view}{pause} | {fps} FPS{help}", d.title);
+        super::platform::hud(&self.window, &text);
     }
 
     fn draw_batch(rpass: &mut wgpu::RenderPass<'_>, b: &DrawBatch) {
@@ -736,7 +741,10 @@ impl GpuState {
             | wgpu::CurrentSurfaceTexture::Occluded
             | wgpu::CurrentSurfaceTexture::Validation => return,
         };
-        let view = frame.texture.create_view(&Default::default());
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(self.config.format.add_srgb_suffix()),
+            ..Default::default()
+        });
         let cmd = self.encode(&view, &self.depth_view);
         self.queue.submit(Some(cmd));
         self.queue.present(frame);
@@ -744,6 +752,7 @@ impl GpuState {
 
     /// Render `frames` frames offscreen (no vsync), waiting for the GPU after
     /// each one, and return (mean ms, 95th-percentile ms).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn bench(&mut self, frames: usize, w: u32, h: u32) -> (f32, f32) {
         let (ow, oh) = (self.config.width, self.config.height);
         self.config.width = w;
@@ -755,7 +764,7 @@ impl GpuState {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: self.config.format,
+            format: self.config.format.add_srgb_suffix(),
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
@@ -779,6 +788,7 @@ impl GpuState {
     }
 
     /// Render one frame at sim time `t` offscreen and write it to `path` as PNG.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn capture(&mut self, t: f32, w: u32, h: u32, path: &str) {
         // Pre-roll particles a few seconds so they are spread out like a live run.
         let was_paused = self.paused;
@@ -788,7 +798,7 @@ impl GpuState {
         self.config.width = w;
         self.config.height = h;
         let depth = make_depth(&self.device, w, h, "cap_depth");
-        let fmt = self.config.format;
+        let fmt = self.config.format.add_srgb_suffix();
         let tex = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("capture"),
             size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },

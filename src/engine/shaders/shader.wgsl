@@ -84,11 +84,12 @@ struct VOut {
     @location(3) @interpolate(flat) mat_id: u32,
 };
 
-const AXIS_NORMALS = array<vec3<f32>, 6>(
-    vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-1.0, 0.0, 0.0),
-    vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, -1.0, 0.0),
-    vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 0.0, -1.0),
-);
+// Normal index 0..5 = +X,-X,+Y,-Y,+Z,-Z.
+fn axis_normal(i: u32) -> vec3<f32> {
+    let axis = i >> 1u;
+    let sign = 1.0 - 2.0 * f32(i & 1u);
+    return vec3<f32>(f32(axis == 0u), f32(axis == 1u), f32(axis == 2u)) * sign;
+}
 
 @vertex
 fn vs_shadow(in: VIn) -> @builtin(position) vec4<f32> {
@@ -101,7 +102,7 @@ fn vs_shadow(in: VIn) -> @builtin(position) vec4<f32> {
 fn vs_main(in: VIn) -> VOut {
     let model = mat4x4<f32>(in.m0, in.m1, in.m2, in.m3);
     let wpos = (model * vec4<f32>(in.v_pos, 1.0)).xyz;
-    let wnorm = normalize((model * vec4<f32>(AXIS_NORMALS[in.v_nm & 0xffu], 0.0)).xyz);
+    let wnorm = normalize((model * vec4<f32>(axis_normal(in.v_nm & 0xffu), 0.0)).xyz);
     var out: VOut;
     out.world_pos = wpos;
     out.normal = wnorm;

@@ -8,6 +8,7 @@ pub mod gpu;
 #[allow(dead_code)]
 pub mod math;
 pub mod pipelines;
+pub mod platform;
 pub mod scene;
 #[allow(dead_code)]
 pub mod sdf;
@@ -17,7 +18,13 @@ pub mod voxel;
 /// Run `f` over `items` on scoped threads (one per item, results in order).
 /// Scene generation is a handful of large independent jobs, so this simple
 /// fan-out is enough and keeps output deterministic.
+/// In the browser (no threads without extra setup) it simply runs in order.
 pub fn par_map<T: Sync, R: Send, F: Fn(&T) -> R + Sync>(items: &[T], f: F) -> Vec<R> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        items.iter().map(f).collect()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     std::thread::scope(|s| {
         let handles: Vec<_> = items.iter().map(|it| s.spawn(|| f(it))).collect();
         handles.into_iter().map(|h| h.join().expect("generation thread panicked")).collect()

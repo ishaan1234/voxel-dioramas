@@ -95,7 +95,36 @@ Voxelisers: `fill_sdf` (any SDF + paint callback), `carve_sdf` (subtract),
    for per-frame instances (emit them in the same order in `update_dynamic_instances`).
 3. Register it in `src/scenes/mod.rs`.
 
-## Run
+## Run in the browser (iPad, iPhone, Mac, PC)
+
+The same Rust code compiles to WebAssembly and renders with **WebGPU**, so it
+runs in current Safari (iPadOS / iOS / macOS 26+), Chrome and Edge.
+
+- **Hosted:** the `Web (GitHub Pages)` workflow publishes every push to `main`.
+  On iPad, open the page in Safari, then **Share → Add to Home Screen** to get a
+  full-screen app icon.
+- **Touch:** one finger orbits; two fingers pinch to zoom and drag to pan. The
+  bottom bar switches scenes, time of day, tour, pause and camera views.
+- **Pick a scene by URL:** `?scene=sakura` or `?scene=sky-islands`.
+- **Build it yourself:**
+
+  ```
+  rustup target add wasm32-unknown-unknown
+  cargo install wasm-bindgen-cli --version 0.2.130 --locked
+  bash scripts/build-web.sh
+  python -m http.server 8080 --directory dist   # open http://localhost:8080
+  ```
+
+The browser build generates the world on a single thread, so the first load
+takes longer than on desktop.
+
+## Desktop downloads
+
+Pushing a tag such as `v0.2.0` runs the `Release` workflow, which builds
+Windows, macOS (Apple Silicon and Intel) and Linux executables plus a zipped web
+build, and attaches them to a GitHub Release.
+
+## Run on desktop from source
 
 Requires Rust (stable) and a GPU with Vulkan, DX12 or Metal.
 

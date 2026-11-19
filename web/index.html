@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Voxel Dioramas</title>
+  <meta name="description" content="Procedural micro-voxel dioramas rendered with WebGPU.">
+  <meta name="theme-color" content="#0f1a36">
+  <!-- Add to Home Screen: launch full screen like an app -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Dioramas">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="icon" href="icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: rgba(12, 18, 36, 0.72);
+      --panel-border: rgba(255, 255, 255, 0.14);
+      --text: #f2f5fb;
+      --muted: #aab4c8;
+      --accent: #ffcf5a;
+    }
+    html, body {
+      margin: 0; height: 100%; background: var(--bg); color: var(--text);
+      font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+      overflow: hidden; overscroll-behavior: none;
+      -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+    }
+    canvas#scene-canvas {
+      position: fixed; inset: 0; width: 100vw; height: 100dvh; display: block;
+      touch-action: none; outline: none;
+    }
+    .hud {
+      position: fixed; top: max(12px, env(safe-area-inset-top)); left: max(12px, env(safe-area-inset-left));
+      padding: 6px 12px; border-radius: 10px; background: var(--panel);
+      border: 1px solid var(--panel-border); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+      font-size: 13px; color: var(--muted); max-width: calc(100vw - 32px);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;
+    }
+    .hud:empty { display: none; }
+    .status {
+      position: fixed; inset: 0; display: flex; flex-direction: column; gap: 14px;
+      align-items: center; justify-content: center; text-align: center; padding: 24px;
+      background: radial-gradient(ellipse at center, rgba(15, 26, 54, 0.82), rgba(5, 8, 20, 0.92));
+      font-size: 17px; z-index: 5;
+    }
+    .status[hidden] { display: none; }
+    .spinner {
+      width: 36px; height: 36px; border-radius: 50%;
+      border: 3px solid rgba(255, 255, 255, 0.18); border-top-color: var(--accent);
+      animation: spin 0.9s linear infinite;
+    }
+    .status.error .spinner { display: none; }
+    .status .note { color: var(--muted); font-size: 14px; max-width: 520px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .bar {
+      position: fixed; left: 50%; transform: translateX(-50%);
+      bottom: max(14px, env(safe-area-inset-bottom)); display: flex; gap: 6px; flex-wrap: wrap;
+      justify-content: center; padding: 6px; border-radius: 16px; background: var(--panel);
+      border: 1px solid var(--panel-border); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      max-width: calc(100vw - 24px); z-index: 4;
+    }
+    .bar button, .views button {
+      min-width: 44px; min-height: 44px; padding: 0 14px; border-radius: 12px; border: 0;
+      background: rgba(255, 255, 255, 0.08); color: var(--text); font: inherit; cursor: pointer;
+    }
+    .bar button:hover, .views button:hover { background: rgba(255, 255, 255, 0.16); }
+    .bar button:active, .views button:active { background: rgba(255, 207, 90, 0.35); }
+    .bar button:focus-visible, .views button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .views {
+      position: fixed; left: 50%; transform: translateX(-50%);
+      bottom: calc(max(14px, env(safe-area-inset-bottom)) + 66px); display: grid;
+      grid-template-columns: repeat(9, auto); gap: 6px; padding: 6px; border-radius: 14px;
+      background: var(--panel); border: 1px solid var(--panel-border); z-index: 4;
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    }
+    .views[hidden], .help[hidden] { display: none; }
+    .help {
+      position: fixed; right: max(12px, env(safe-area-inset-right)); top: max(12px, env(safe-area-inset-top));
+      width: min(340px, calc(100vw - 24px)); padding: 14px 16px; border-radius: 14px;
+      background: var(--panel); border: 1px solid var(--panel-border); z-index: 6;
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); font-size: 14px;
+    }
+    .help h2 { margin: 0 0 8px; font-size: 15px; }
+    .help h3 { margin: 12px 0 4px; font-size: 13px; color: var(--accent); }
+    .help ul { margin: 0; padding-left: 18px; color: var(--muted); }
+    kbd {
+      font: 12px ui-monospace, monospace; padding: 1px 5px; border-radius: 4px;
+      background: rgba(255, 255, 255, 0.12); color: var(--text);
+    }
+    @media (max-width: 640px) {
+      .bar button { padding: 0 10px; }
+      .views { grid-template-columns: repeat(5, auto); }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="scene-canvas" tabindex="0" aria-label="3D diorama"></canvas>
+  <div class="hud" id="hud"></div>
+
+  <div class="status" id="status" role="status" aria-live="polite">
+    <div class="spinner"></div>
+    <div id="status-text">Loading...</div>
+    <div class="note" id="status-note"></div>
+  </div>
+
+  <div class="views" id="views" hidden></div>
+  <nav class="bar" aria-label="Controls">
+    <button data-cmd="prev_scene" aria-label="Previous scene">◀</button>
+    <button data-cmd="next_scene" aria-label="Next scene">Scene ▶</button>
+    <button data-cmd="time">Time of day</button>
+    <button data-cmd="tour">Tour</button>
+    <button data-cmd="pause">Pause</button>
+    <button id="views-btn" aria-expanded="false" aria-controls="views">Views</button>
+    <button id="help-btn" aria-expanded="false" aria-controls="help" aria-label="Help">?</button>
+  </nav>
+
+  <aside class="help" id="help" hidden>
+    <h2>Controls</h2>
+    <h3>Touch</h3>
+    <ul>
+      <li>One finger: orbit</li>
+      <li>Two fingers: pinch to zoom, drag to pan</li>
+    </ul>
+    <h3>Mouse &amp; keyboard</h3>
+    <ul>
+      <li>Left-drag orbit · right-drag pan · scroll zoom</li>
+      <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move · <kbd>Q</kbd>/<kbd>E</kbd> down/up · <kbd>Shift</kbd> faster</li>
+      <li>Arrow keys turn · <kbd>1</kbd>–<kbd>9</kbd> views · <kbd>Tab</kbd> next scene</li>
+      <li><kbd>N</kbd> time of day · <kbd>T</kbd> tour · <kbd>P</kbd> pause</li>
+    </ul>
+    <h3>Install</h3>
+    <ul>
+      <li>iPad/iPhone: Share → Add to Home Screen for full-screen app mode.</li>
+    </ul>
+  </aside>
+
+  <script>
+    // Hooks called from Rust (engine/platform.rs).
+    const statusEl = document.getElementById('status');
+    const statusText = document.getElementById('status-text');
+    const statusNote = document.getElementById('status-note');
+    globalThis.voxelHud = (text) => { document.getElementById('hud').textContent = text; };
+    globalThis.voxelStatus = (text) => {
+      statusEl.hidden = !text;
+      statusText.textContent = text;
+      if (text.startsWith('Generating')) {
+        statusNote.textContent = 'The world is generated from math on this device. This can take several seconds.';
+      } else {
+        statusNote.textContent = '';
+      }
+    };
+    globalThis.voxelError = (title, note) => {
+      statusEl.hidden = false;
+      statusEl.classList.add('error');
+      statusText.textContent = title;
+      statusNote.textContent = note;
+    };
+    window.addEventListener('error', (e) => voxelError('Something went wrong.', String(e.message || e.error)));
+    window.addEventListener('unhandledrejection', (e) => voxelError('Something went wrong.', String(e.reason)));
+  </script>
+  <script type="module">
+    if (!('gpu' in navigator)) {
+      voxelError(
+        'This browser does not support WebGPU.',
+        'Use a current Safari (iPadOS / iOS / macOS 26 or newer), Chrome or Edge. On older iPadOS, ' +
+        'WebGPU can be enabled in Settings › Apps › Safari › Advanced › Feature Flags.'
+      );
+    } else {
+      const wasm = await import('./pkg/dioramas.js');
+      await wasm.default();          // instantiates the module and runs web_start()
+      const canvas = document.getElementById('scene-canvas');
+      canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+      canvas.addEventListener('pointerdown', () => canvas.focus());
+      canvas.focus();
+
+      const send = (cmd) => { wasm.voxel_command(cmd); canvas.focus(); };
+      document.querySelectorAll('[data-cmd]').forEach((b) =>
+        b.addEventListener('click', () => send(b.dataset.cmd)));
+
+      const views = document.getElementById('views');
+      const viewsBtn = document.getElementById('views-btn');
+      for (let i = 1; i <= 9; i++) {
+        const b = document.createElement('button');
+        b.textContent = String(i);
+        b.setAttribute('aria-label', `Camera view ${i}`);
+        b.addEventListener('click', () => { send(`preset:${i}`); });
+        views.appendChild(b);
+      }
+      viewsBtn.addEventListener('click', () => {
+        views.hidden = !views.hidden;
+        viewsBtn.setAttribute('aria-expanded', String(!views.hidden));
+      });
+      const help = document.getElementById('help');
+      const helpBtn = document.getElementById('help-btn');
+      helpBtn.addEventListener('click', () => {
+        help.hidden = !help.hidden;
+        helpBtn.setAttribute('aria-expanded', String(!help.hidden));
+      });
+    }
+  </script>
+</body>
+</html>

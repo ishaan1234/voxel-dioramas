@@ -183,51 +183,83 @@ impl SkyIslands {
         // ---- Heavy geometry, generated in parallel ------------------------------
         let compile = |v: MicroVoxelVolume| -> (MeshData, u64) { v.compile(&mut ColorCache::new()) };
         let hero = &islands[HERO];
-        let (island_meshes, sea, obs, bridge_meshes, kit, rings, orb, islet_meshes, bird, flower_meshes, tuft_meshes) = std::thread::scope(|sc| {
-            let isl = sc.spawn(|| {
-                let jobs: Vec<usize> = (0..islands.len()).collect();
-                par_map(&jobs, |&i| {
+        enum Job {
+            Islands,
+            Sea,
+            Observatory,
+            Bridges,
+            Flora,
+            Rings,
+            Orb,
+            Islets,
+            Bird,
+            Flowers,
+            Grass,
+        }
+        enum Out {
+            Islands(Vec<((MeshData, u64), (MeshData, u64))>),
+            One((MeshData, u64)),
+            Many(Vec<(MeshData, u64)>),
+            Flora(super::flora::FloraKit),
+        }
+        let jobs = [
+            Job::Islands, Job::Sea, Job::Observatory, Job::Bridges, Job::Flora, Job::Rings,
+            Job::Orb, Job::Islets, Job::Bird, Job::Flowers, Job::Grass,
+        ];
+        let lod_jobs = |n: usize| -> Vec<(usize, f32)> { (0..n).flat_map(|i| flowers::LOD_SCALES.map(|s| (i, s))).collect() };
+        let mut outs = par_map(&jobs, |job| match job {
+            Job::Islands => {
+                let ids: Vec<usize> = (0..islands.len()).collect();
+                Out::Islands(par_map(&ids, |&i| {
                     let (vol, water) = islands[i].voxelize(&stalactites[i]);
                     (compile(vol), compile(water))
-                })
-            });
-            let sea = sc.spawn(|| effects::build_cloud_sea(&mut ColorCache::new()));
-            let obs = sc.spawn(|| observatory::build_observatory(&hero.paths, &mut ColorCache::new()));
-            let br = sc.spawn(|| par_map(&bridges, |(_, _, b)| b.build(&mut ColorCache::new())));
-            let kit = sc.spawn(build_flora);
-            let rings = sc.spawn(|| {
+                }))
+            }
+            Job::Sea => Out::One(effects::build_cloud_sea(&mut ColorCache::new())),
+            Job::Observatory => Out::One(observatory::build_observatory(&hero.paths, &mut ColorCache::new())),
+            Job::Bridges => Out::Many(par_map(&bridges, |(_, _, b)| b.build(&mut ColorCache::new()))),
+            Job::Flora => Out::Flora(build_flora()),
+            Job::Rings => {
                 let specs = [(5.6, pal::GOLD, pal::BRONZE), (4.7, pal::BRASS, pal::GOLD), (3.8, pal::BRONZE, pal::GOLD)];
-                par_map(&specs, |&(r, col, notch)| observatory::build_ring(r, col, notch, &mut ColorCache::new()))
-            });
-            let orb = sc.spawn(|| observatory::build_orb(&mut ColorCache::new()));
-            let islet_m = sc.spawn(|| {
-                let jobs: Vec<usize> = (0..islet_specs.len()).collect();
-                par_map(&jobs, |&k| compile(islet_specs[k].voxelize(&islet_stal[k]).0))
-            });
-            let bird = sc.spawn(|| effects::build_bird(&mut ColorCache::new()));
-            let fl = sc.spawn(|| {
-                let jobs: Vec<usize> = (0..flowers::VARIANTS.len()).collect();
-                let jobs: Vec<(usize, f32)> = jobs.iter().flat_map(|&i| flowers::LOD_SCALES.map(|s| (i, s))).collect();
-                par_map(&jobs, |&(i, s)| flowers::build_flower(flowers::VARIANTS[i], 900 + i as u32, s, &mut ColorCache::new()))
-            });
-            let tufts = sc.spawn(|| {
-                let jobs: Vec<([u32; 3], f32)> = GRASS_PALETTES.iter().flat_map(|&g| flowers::LOD_SCALES.map(|s| (g, s))).collect();
-                par_map(&jobs, |&(g, s)| flowers::build_grass_tuft(g, 77, s, &mut ColorCache::new()))
-            });
-            (
-                isl.join().unwrap(),
-                sea.join().unwrap(),
-                obs.join().unwrap(),
-                br.join().unwrap(),
-                kit.join().unwrap(),
-                rings.join().unwrap(),
-                orb.join().unwrap(),
-                islet_m.join().unwrap(),
-                bird.join().unwrap(),
-                fl.join().unwrap(),
-                tufts.join().unwrap(),
-            )
-        });
+                Out::Many(par_map(&specs, |&(r, col, notch)| observatory::build_ring(r, col, notch, &mut ColorCache::new())))
+            }
+            Job::Orb => Out::One(observatory::build_orb(&mut ColorCache::new())),
+            Job::Islets => {
+                let ids: Vec<usize> = (0..islet_specs.len()).collect();
+                Out::Many(par_map(&ids, |&k| compile(islet_specs[k].voxelize(&islet_stal[k]).0)))
+            }
+            Job::Bird => Out::One(effects::build_bird(&mut ColorCache::new())),
+            Job::Flowers => Out::Many(par_map(&lod_jobs(flowers::VARIANTS.len()), |&(i, s)| {
+                flowers::build_flower(flowers::VARIANTS[i], 900 + i as u32, s, &mut ColorCache::new())
+            })),
+            Job::Grass => Out::Many(par_map(&lod_jobs(GRASS_PALETTES.len()), |&(i, s)| {
+                flowers::build_grass_tuft(GRASS_PALETTES[i], 77, s, &mut ColorCache::new())
+            })),
+        })
+        .into_iter();
+        fn one(o: Option<Out>) -> (MeshData, u64) {
+            match o {
+                Some(Out::One(m)) => m,
+                _ => unreachable!("job order"),
+            }
+        }
+        fn many(o: Option<Out>) -> Vec<(MeshData, u64)> {
+            match o {
+                Some(Out::Many(v)) => v,
+                _ => unreachable!("job order"),
+            }
+        }
+        let Some(Out::Islands(island_meshes)) = outs.next() else { unreachable!("job order") };
+        let sea = one(outs.next());
+        let obs = one(outs.next());
+        let bridge_meshes = many(outs.next());
+        let Some(Out::Flora(kit)) = outs.next() else { unreachable!("job order") };
+        let rings = many(outs.next());
+        let orb = one(outs.next());
+        let islet_meshes = many(outs.next());
+        let bird = one(outs.next());
+        let flower_meshes = many(outs.next());
+        let tuft_meshes = many(outs.next());
 
         // ---- Assemble (same batch order as before) ------------------------------
         for (spec, (opaque, water)) in islands.iter().zip(&island_meshes) {

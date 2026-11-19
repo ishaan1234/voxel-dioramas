@@ -4,10 +4,32 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[lib]
+name = "dioramas"
+# rlib for the desktop binary and tests, cdylib for the WebAssembly build.
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 wgpu = "30.0"
 winit = "0.30"
 glam = { version = "0.33", features = ["bytemuck"] }
 bytemuck = { version = "1.25", features = ["derive"] }
+# std::time::Instant panics in browsers; web-time is std's Instant on native.
+web-time = "1.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "1.0"
 png = "0.18"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Pinned exactly: the wasm-bindgen CLI used to post-process the build must match.
+wasm-bindgen = "=0.2.130"
+wasm-bindgen-futures = "0.4.80"
+js-sys = "0.3.107"
+web-sys = { version = "0.3.107", features = ["Window", "Document", "Element", "HtmlCanvasElement", "Location"] }
+console_error_panic_hook = "0.1"
+
+[profile.release]
+# Smaller, faster WebAssembly; harmless for native.
+lto = "thin"
+codegen-units = 4
