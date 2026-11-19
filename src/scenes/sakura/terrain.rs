@@ -591,12 +591,12 @@ impl TerrainGrid {
 
                         let mut push_v = |px: f32, pz: f32, a: u8| {
                             let m = ao_factors[a as usize];
-                            opaque.vertices.push(VoxelVertex {
-                                pos: [px, wy, pz],
-                                norm: [0.0, 1.0, 0.0],
-                                color: [rgb[0] * m, rgb[1] * m, rgb[2] * m],
-                                mat_id: MAT_MATTE as u32,
-                            });
+                            opaque.vertices.push(VoxelVertex::new(
+                                [px, wy, pz],
+                                [0.0, 1.0, 0.0],
+                                [rgb[0] * m, rgb[1] * m, rgb[2] * m],
+                                MAT_MATTE as u32,
+                            ));
                         };
                         push_v(wx0, wz1, a00);
                         push_v(wx1, wz1, a10);
@@ -641,12 +641,7 @@ impl TerrainGrid {
                         let coords = [[x0, py0, z0], [x1, py0, z1], [x1, py1, z1], [x0, py1, z0]];
                         for (k, &pos) in coords.iter().enumerate() {
                             let k_ao = if k < 2 { b_shade * 0.84 } else { b_shade };
-                            opaque.vertices.push(VoxelVertex {
-                                pos,
-                                norm: [nx, 0.0, nz],
-                                color: [rgb[0] * k_ao, rgb[1] * k_ao, rgb[2] * k_ao],
-                                mat_id: MAT_MATTE as u32,
-                            });
+                            opaque.vertices.push(VoxelVertex::new(pos, [nx, 0.0, nz], [rgb[0] * k_ao, rgb[1] * k_ao, rgb[2] * k_ao], MAT_MATTE as u32));
                         }
                         opaque.indices.extend_from_slice(&[bv, bv + 1, bv + 2, bv, bv + 2, bv + 3]);
                         ys += step_h;
@@ -700,12 +695,7 @@ impl TerrainGrid {
                                 [wx1, wy_world, wz0],
                                 [wx0, wy_world, wz0],
                             ] {
-                                water.vertices.push(VoxelVertex {
-                                    pos,
-                                    norm: [0.0, 1.0, 0.0],
-                                    color: wrgb,
-                                    mat_id: MAT_WATER as u32,
-                                });
+                                water.vertices.push(VoxelVertex::new(pos, [0.0, 1.0, 0.0], wrgb, MAT_WATER as u32));
                             }
                             water.indices.extend_from_slice(&[bv, bv + 1, bv + 2, bv, bv + 2, bv + 3]);
 
@@ -719,12 +709,7 @@ impl TerrainGrid {
                                     [wx1, wy_world, wz1],
                                     [wx0, wy_world, wz1],
                                 ] {
-                                    water.vertices.push(VoxelVertex {
-                                        pos,
-                                        norm: [0.0, 0.0, 1.0],
-                                        color: wrgb,
-                                        mat_id: MAT_WATER as u32,
-                                    });
+                                    water.vertices.push(VoxelVertex::new(pos, [0.0, 0.0, 1.0], wrgb, MAT_WATER as u32));
                                 }
                                 water.indices.extend_from_slice(&[bv2, bv2 + 1, bv2 + 2, bv2, bv2 + 2, bv2 + 3]);
                             }

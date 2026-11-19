@@ -15,13 +15,30 @@ pub const MAT_WATER: u8 = 7;
 pub const MAT_CLOUD: u8 = 8;
 pub const MAT_MIST: u8 = 9;
 
+/// Packed 24-byte vertex (was 40): voxel normals are always axis-aligned, so
+/// they are stored as an index 0..5; linear colour (with baked AO) fits in
+/// 16-bit unorm without visible banding.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct VoxelVertex {
     pub pos: [f32; 3],
-    pub norm: [f32; 3],
-    pub color: [f32; 3],
-    pub mat_id: u32,
+    /// Linear RGB as unorm16; the 4th lane is padding.
+    pub color: [u16; 4],
+    /// bits 0..7 = normal index (+X,-X,+Y,-Y,+Z,-Z), bits 8..15 = material id.
+    pub normal_mat: u32,
+}
+
+impl VoxelVertex {
+    #[inline]
+    pub fn new(pos: [f32; 3], norm: [f32; 3], color: [f32; 3], mat_id: u32) -> Self {
+        let (ax, v) = norm
+            .iter()
+            .enumerate()
+            .fold((0, 0.0f32), |(bi, bv), (i, &c)| if c.abs() > bv.abs() { (i, c) } else { (bi, bv) });
+        let n_idx = (ax * 2 + usize::from(v < 0.0)) as u32;
+        let q = |c: f32| (c.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
+        Self { pos, color: [q(color[0]), q(color[1]), q(color[2]), 65535], normal_mat: n_idx | (mat_id << 8) }
+    }
 }
 
 #[repr(C)]
@@ -457,12 +474,7 @@ impl MicroVoxelVolume {
                             p[u_axis] = pu;
                             p[v_axis] = pv;
                             let mult = shade * AO_FACTORS[(ao_bits & 3) as usize];
-                            mesh.vertices.push(VoxelVertex {
-                                pos: p,
-                                norm: n_vec,
-                                color: [rgb[0] * mult, rgb[1] * mult, rgb[2] * mult],
-                                mat_id: m as u32,
-                            });
+                            mesh.vertices.push(VoxelVertex::new(p, n_vec, [rgb[0] * mult, rgb[1] * mult, rgb[2] * mult], m as u32));
                         };
 
                         let a00 = ao & 3;
@@ -525,12 +537,7 @@ pub fn build_unit_box_mesh(
             [rgb[0] * shade, rgb[1] * shade, rgb[2] * shade]
         };
         for pos in pts {
-            mesh.vertices.push(VoxelVertex {
-                pos,
-                norm,
-                color: col,
-                mat_id,
-            });
+            mesh.vertices.push(VoxelVertex::new(pos, norm, col, mat_id));
         }
         mesh.indices.extend_from_slice(&[bv, bv + 1, bv + 2, bv, bv + 2, bv + 3]);
     }

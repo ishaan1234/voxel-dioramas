@@ -103,6 +103,34 @@ cargo run --release -- --list       # list scene ids
 cargo test --release                # unit + scene consistency tests
 ```
 
+### Benchmark
+
+```
+cargo run --release -- sky-islands --bench --size 1920x1080
+```
+
+Renders 200 frames per camera preset offscreen without vsync and prints mean and
+95th-percentile frame times.
+
+### Performance notes
+
+Measured on Intel Iris Xe (integrated) at 1080p, averaged over all presets:
+Sky Islands 65.7 → 17.1 ms, Sakura 78.7 → 28.0 ms. Before/after screenshots of
+every scene differ by at most 1/255 per pixel. The optimizations:
+
+- **Cached shadow map**: static casters are rendered once per lighting setup;
+  each frame copies that map and draws only moving casters on top.
+- **24-byte vertices** (were 40): axis-aligned normals stored as an index,
+  linear colour as unorm16.
+- **Frustum culling** with per-batch bounding spheres; instanced batches are
+  split into 80 m spatial clusters.
+- **Shadow filtering**: the same 3×3 bilinear PCF result from 4 weighted
+  hardware taps instead of 9.
+- **Parallel generation**: random choices are planned sequentially (same world
+  every run), then meshes are built on all cores.
+- **Smooth camera**: orbit, pan, zoom and preset changes ease in with
+  frame-rate-independent damping.
+
 ### Offscreen screenshots
 
 ```

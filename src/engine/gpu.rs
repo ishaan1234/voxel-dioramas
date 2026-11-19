@@ -13,12 +13,31 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 use super::camera::OrbitCam;
+use super::culling::{build_draw_list, frustum_planes, visible, DrawList};
 use super::math::Rng;
 use super::pipelines::{
     cube_mesh, make_depth, PetalCam, PetalGpu, Pipelines, SimParams, Uniforms, SHADOW_RES,
 };
 use super::scene::{DrawBatch, ParticleConfig, Scene};
 use super::voxel::ModelInstance;
+
+fn make_shadow_tex(device: &wgpu::Device, label: &str) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d { width: SHADOW_RES, height: SHADOW_RES, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&Default::default());
+    (tex, view)
+}
 
 fn make_particles(cfg: &ParticleConfig) -> Vec<PetalGpu> {
     let mut rng = Rng(cfg.seed);
@@ -52,6 +71,12 @@ struct SceneGpu {
     petal_count: u32,
     petal_comp_bg: wgpu::BindGroup,
     dyn_instances: Vec<ModelInstance>,
+    /// Cullable main-pass draw lists (static batches split into spatial clusters).
+    opaque: DrawList,
+    translucent: DrawList,
+    /// Shadow casters: static ones go to the cached map, dynamic ones every frame.
+    static_shadow: Vec<DrawBatch>,
+    dynamic_shadow: Vec<DrawBatch>,
 }
 
 pub struct GpuState {
@@ -62,6 +87,14 @@ pub struct GpuState {
     config: wgpu::SurfaceConfiguration,
     depth_view: wgpu::TextureView,
     shadow_view: wgpu::TextureView,
+    shadow_tex: wgpu::Texture,
+    static_shadow_tex: wgpu::Texture,
+    static_shadow_view: wgpu::TextureView,
+    /// Time-of-day mode the static shadow cache was rendered for (None = stale).
+    shadow_key: Option<usize>,
+    refresh_shadow: bool,
+    vis_opaque: Vec<bool>,
+    vis_trans: Vec<bool>,
     pipes: Pipelines,
 
     main_bg: wgpu::BindGroup,
@@ -108,6 +141,8 @@ impl GpuState {
             .await
             .unwrap();
 
+        let info = adapter.get_info();
+        println!("GPU: {} ({:?}, {:?})", info.name, info.device_type, info.backend);
         let mut limits = wgpu::Limits::default();
         limits.max_buffer_size = adapter.limits().max_buffer_size;
         let (device, queue) = adapter
@@ -138,7 +173,8 @@ impl GpuState {
         surface.configure(&device, &config);
 
         let depth_view = make_depth(&device, config.width, config.height, "depth");
-        let shadow_view = make_depth(&device, SHADOW_RES, SHADOW_RES, "shadow");
+        let (shadow_tex, shadow_view) = make_shadow_tex(&device, "shadow");
+        let (static_shadow_tex, static_shadow_view) = make_shadow_tex(&device, "static_shadow");
         let shadow_samp = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("shadow_samp"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -207,6 +243,13 @@ impl GpuState {
             config,
             depth_view,
             shadow_view,
+            shadow_tex,
+            static_shadow_tex,
+            static_shadow_view,
+            shadow_key: None,
+            refresh_shadow: true,
+            vis_opaque: Vec::new(),
+            vis_trans: Vec::new(),
             pipes,
             main_bg,
             shadow_bg,
@@ -255,6 +298,12 @@ impl GpuState {
         });
 
         let mut all_instances = d.static_instances.clone();
+        // Culling data (reorders static instances within each batch's range).
+        let cell = 80.0;
+        let opaque = build_draw_list(&d.opaque_batches, &d.vertices, &d.indices, &mut all_instances, d.dynamic_inst_start, cell);
+        let translucent = build_draw_list(&d.translucent_batches, &d.vertices, &d.indices, &mut all_instances, d.dynamic_inst_start, cell);
+        let (dynamic_shadow, static_shadow): (Vec<DrawBatch>, Vec<DrawBatch>) =
+            d.opaque_batches.iter().partition(|b| b.inst_start >= d.dynamic_inst_start);
         let mut dyn_instances = Vec::with_capacity(d.dynamic_inst_count as usize);
         scene.update_dynamic_instances(0.0, &mut dyn_instances);
         all_instances.extend_from_slice(&dyn_instances);
@@ -286,21 +335,53 @@ impl GpuState {
             ],
         });
 
-        SceneGpu { scene, vb, ib, instance_buf, petal_buf, petal_count, petal_comp_bg, dyn_instances }
+        println!(
+            "Culling: {} opaque / {} translucent draw clusters; {} static + {} dynamic shadow casters",
+            opaque.batches.len(),
+            translucent.batches.len(),
+            static_shadow.len(),
+            dynamic_shadow.len()
+        );
+        SceneGpu {
+            scene,
+            vb,
+            ib,
+            instance_buf,
+            petal_buf,
+            petal_count,
+            petal_comp_bg,
+            dyn_instances,
+            opaque,
+            translucent,
+            static_shadow,
+            dynamic_shadow,
+        }
     }
 
     /// Replace the current scene (buffers are rebuilt; camera resets to preset 1).
     pub fn load_scene(&mut self, scene: Box<dyn Scene>) {
         self.sg = Self::upload_scene(&self.device, &self.pipes, &self.sim_buf, scene);
+        self.shadow_key = None;
         self.cam = OrbitCam::new(self.sg.scene.data());
         self.time_mode = 0;
         self.sim_time = 0.0;
         self.update_title(0);
     }
 
+    /// Jump straight to a preset (screenshots / benchmarks).
     pub fn set_preset(&mut self, idx: usize) {
         let d = self.sg.scene.data();
-        self.cam.set_preset(d, idx);
+        self.cam.set_preset(d, idx, true);
+    }
+
+    /// Glide to a preset (keyboard).
+    pub fn fly_to_preset(&mut self, idx: usize) {
+        let d = self.sg.scene.data();
+        self.cam.set_preset(d, idx, false);
+    }
+
+    pub fn preset_count(&self) -> usize {
+        self.sg.scene.data().presets.len()
     }
 
     pub fn cycle_time(&mut self) {
@@ -347,6 +428,7 @@ impl GpuState {
         let t = self.sim_time;
         let d = self.sg.scene.data();
         self.cam.advance_tour(d, dt);
+        self.cam.advance(dt);
 
         if !self.paused && d.dynamic_inst_count > 0 {
             self.sg.scene.update_dynamic_instances(t, &mut self.sg.dyn_instances);
@@ -359,6 +441,13 @@ impl GpuState {
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
         let proj = perspective(44.0f32.to_radians(), aspect, 0.8, 1300.0);
         let vp = proj * look_at_mat4(eye, tgt, Vec3::Y);
+
+        // Frustum culling.
+        let planes = frustum_planes(vp);
+        self.vis_opaque = self.sg.opaque.bounds.iter().map(|b| visible(&planes, b)).collect();
+        self.vis_trans = self.sg.translucent.bounds.iter().map(|b| visible(&planes, b)).collect();
+        self.refresh_shadow = self.shadow_key != Some(self.time_mode);
+        self.shadow_key = Some(self.time_mode);
 
         let tod = &d.time_modes[self.time_mode];
         let sh = &d.shadow;
@@ -416,7 +505,6 @@ impl GpuState {
     }
 
     fn encode(&self, color_view: &wgpu::TextureView, depth_view: &wgpu::TextureView) -> wgpu::CommandBuffer {
-        let d = self.sg.scene.data();
         let mut enc = self.device.create_command_encoder(&Default::default());
 
         if self.sg.petal_count > 0 {
@@ -426,13 +514,16 @@ impl GpuState {
             cpass.dispatch_workgroups(self.sg.petal_count.div_ceil(64), 1, 1);
         }
 
-        {
+        // Shadows: static casters are rendered once per lighting setup into a
+        // cached map; each frame that map is copied and only moving casters drawn.
+        let shadow_pass = |enc: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, clear: bool, list: &[DrawBatch]| {
+            let load = if clear { wgpu::LoadOp::Clear(1.0) } else { wgpu::LoadOp::Load };
             let mut spass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow_pass"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    view,
+                    depth_ops: Some(wgpu::Operations { load, store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
                 ..Default::default()
@@ -442,9 +533,18 @@ impl GpuState {
             spass.set_vertex_buffer(0, self.sg.vb.slice(..));
             spass.set_vertex_buffer(1, self.sg.instance_buf.slice(..));
             spass.set_index_buffer(self.sg.ib.slice(..), wgpu::IndexFormat::Uint32);
-            for b in &d.opaque_batches {
+            for b in list {
                 Self::draw_batch(&mut spass, b);
             }
+        };
+        if self.refresh_shadow {
+            shadow_pass(&mut enc, &self.static_shadow_view, true, &self.sg.static_shadow);
+        }
+        let full = wgpu::Extent3d { width: SHADOW_RES, height: SHADOW_RES, depth_or_array_layers: 1 };
+        let tex_info = |t| wgpu::TexelCopyTextureInfo { texture: t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All };
+        enc.copy_texture_to_texture(tex_info(&self.static_shadow_tex), tex_info(&self.shadow_tex), full);
+        if !self.sg.dynamic_shadow.is_empty() {
+            shadow_pass(&mut enc, &self.shadow_view, false, &self.sg.dynamic_shadow);
         }
 
         {
@@ -473,8 +573,10 @@ impl GpuState {
             rpass.set_vertex_buffer(0, self.sg.vb.slice(..));
             rpass.set_vertex_buffer(1, self.sg.instance_buf.slice(..));
             rpass.set_index_buffer(self.sg.ib.slice(..), wgpu::IndexFormat::Uint32);
-            for b in &d.opaque_batches {
-                Self::draw_batch(&mut rpass, b);
+            for (b, &v) in self.sg.opaque.batches.iter().zip(&self.vis_opaque) {
+                if v {
+                    Self::draw_batch(&mut rpass, b);
+                }
             }
 
             if self.sg.petal_count > 0 {
@@ -491,8 +593,10 @@ impl GpuState {
             rpass.set_vertex_buffer(0, self.sg.vb.slice(..));
             rpass.set_vertex_buffer(1, self.sg.instance_buf.slice(..));
             rpass.set_index_buffer(self.sg.ib.slice(..), wgpu::IndexFormat::Uint32);
-            for b in &d.translucent_batches {
-                Self::draw_batch(&mut rpass, b);
+            for (b, &v) in self.sg.translucent.batches.iter().zip(&self.vis_trans) {
+                if v {
+                    Self::draw_batch(&mut rpass, b);
+                }
             }
         }
         enc.finish()
@@ -533,6 +637,42 @@ impl GpuState {
         let cmd = self.encode(&view, &self.depth_view);
         self.queue.submit(Some(cmd));
         self.queue.present(frame);
+    }
+
+    /// Render `frames` frames offscreen (no vsync), waiting for the GPU after
+    /// each one, and return (mean ms, 95th-percentile ms).
+    pub fn bench(&mut self, frames: usize, w: u32, h: u32) -> (f32, f32) {
+        let (ow, oh) = (self.config.width, self.config.height);
+        self.config.width = w;
+        self.config.height = h;
+        let depth = make_depth(&self.device, w, h, "bench_depth");
+        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("bench"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&Default::default());
+        let mut times = Vec::with_capacity(frames);
+        for i in 0..frames + 10 {
+            let start = Instant::now();
+            self.prepare(1.0 / 60.0);
+            let cmd = self.encode(&view, &depth);
+            self.queue.submit(Some(cmd));
+            self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            if i >= 10 {
+                times.push(start.elapsed().as_secs_f32() * 1000.0);
+            }
+        }
+        self.config.width = ow;
+        self.config.height = oh;
+        let mean = times.iter().sum::<f32>() / times.len() as f32;
+        times.sort_by(f32::total_cmp);
+        (mean, times[(times.len() as f32 * 0.95) as usize])
     }
 
     /// Render one frame at sim time `t` offscreen and write it to `path` as PNG.

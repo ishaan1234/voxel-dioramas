@@ -157,34 +157,40 @@ pub struct FloraKit {
     pub voxels: u64,
 }
 
-pub fn build_flora(colors: &mut ColorCache) -> FloraKit {
-    let mut voxels = 0;
-    let mut mk = |style: &TreeStyle, seeds: &[u32], colors: &mut ColorCache| -> Vec<MeshData> {
-        seeds
-            .iter()
-            .map(|&s| {
-                let (m, c) = build_tree(style, s, colors);
-                voxels += c;
-                m
-            })
-            .collect()
-    };
+/// Every tree archetype is independent, so they are grown in parallel.
+pub fn build_flora() -> FloraKit {
     let oak = TreeStyle { trunk_len: 2.6, trunk_r: 0.42, depth: 3, spread: 0.62, leaf_r: 1.7, bark: pal::BARK_LT, leaves: pal::LEAF, lanterns: 0.0 };
     let blossom = TreeStyle { trunk_len: 2.2, trunk_r: 0.36, depth: 3, spread: 0.75, leaf_r: 1.5, bark: pal::BARK, leaves: pal::BLOSSOM, lanterns: 0.0 };
     let gold = TreeStyle { trunk_len: 3.0, trunk_r: 0.34, depth: 3, spread: 0.5, leaf_r: 1.4, bark: pal::BARK_PALE, leaves: pal::LEAF_GOLD, lanterns: 0.0 };
     let spirit = TreeStyle { trunk_len: 6.5, trunk_r: 1.5, depth: 5, spread: 0.58, leaf_r: 2.6, bark: pal::BARK_LT, leaves: pal::SPIRIT_LEAF, lanterns: 0.45 };
 
-    let oaks = mk(&oak, &[11, 23, 37], colors);
-    let blossoms = mk(&blossom, &[41, 53], colors);
-    let golds = mk(&gold, &[61, 79], colors);
-    let spirit_tree = mk(&spirit, &[2027], colors).pop().unwrap();
-    let pines: Vec<MeshData> = [101u32, 131]
-        .iter()
-        .map(|&s| {
-            let (m, c) = build_pine(s, colors);
-            voxels += c;
-            m
-        })
-        .collect();
+    enum Job<'a> {
+        Tree(&'a TreeStyle, u32),
+        Pine(u32),
+    }
+    let jobs = [
+        Job::Tree(&oak, 11),
+        Job::Tree(&oak, 23),
+        Job::Tree(&oak, 37),
+        Job::Tree(&blossom, 41),
+        Job::Tree(&blossom, 53),
+        Job::Tree(&gold, 61),
+        Job::Tree(&gold, 79),
+        Job::Pine(101),
+        Job::Pine(131),
+        Job::Tree(&spirit, 2027),
+    ];
+    let built = par_map(&jobs, |j| match j {
+        Job::Tree(style, seed) => build_tree(style, *seed, &mut ColorCache::new()),
+        Job::Pine(seed) => build_pine(*seed, &mut ColorCache::new()),
+    });
+    let voxels = built.iter().map(|(_, c)| c).sum();
+    let mut it = built.into_iter().map(|(m, _)| m);
+    let mut take = |n: usize| (0..n).map(|_| it.next().unwrap()).collect::<Vec<_>>();
+    let oaks = take(3);
+    let blossoms = take(2);
+    let golds = take(2);
+    let pines = take(2);
+    let spirit_tree = take(1).pop().unwrap();
     FloraKit { oaks, blossoms, golds, pines, spirit_tree, voxels }
 }

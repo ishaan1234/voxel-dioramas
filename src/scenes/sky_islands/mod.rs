@@ -147,7 +147,8 @@ mod tests {
     fn islands_hang_clear_of_the_cloud_puffs() {
         let mut rng = Rng(1);
         for spec in plan_islands() {
-            let (vol, _) = spec.voxelize(&mut rng);
+            let st = spec.plan_stalactites(&mut rng);
+            let (vol, _) = spec.voxelize(&st);
             let lowest = (vol.oy..vol.oy + vol.ny)
                 .find(|&y| (vol.oz..vol.oz + vol.nz).any(|z| (vol.ox..vol.ox + vol.nx).any(|x| vol.get(x, y, z) != 0)))
                 .unwrap();

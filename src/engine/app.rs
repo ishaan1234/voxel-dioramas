@@ -30,6 +30,8 @@ pub struct RunOptions {
     pub scene_idx: usize,
     pub shots: Vec<Shot>,
     pub shot_size: (u32, u32),
+    /// `--bench`: time every camera preset offscreen and exit.
+    pub bench: bool,
 }
 
 struct App {
@@ -61,9 +63,26 @@ impl ApplicationHandler for App {
             .with_title(format!("Voxel Dioramas — Generating {}...", entry.id))
             .with_inner_size(winit::dpi::LogicalSize::new(1440.0, 900.0));
         let win = Arc::new(event_loop.create_window(attrs).unwrap());
+        let t0 = std::time::Instant::now();
         let scene = (entry.build)();
+        println!("Generated {} in {:.2}s", entry.id, t0.elapsed().as_secs_f32());
         let mut state = pollster::block_on(GpuState::new(win, scene));
 
+        if self.opts.bench {
+            let (w, h) = self.opts.shot_size;
+            let n = state.preset_count();
+            let mut total = 0.0;
+            println!("Benchmark {w}x{h}, 200 frames per view (no vsync):");
+            for p in 0..n {
+                state.set_preset(p);
+                let (mean, p95) = state.bench(200, w, h);
+                total += mean;
+                println!("  {:<20} mean {mean:6.2} ms  p95 {p95:6.2} ms  ({:.0} fps)", state.cam.preset_name, 1000.0 / mean);
+            }
+            println!("  average over views: {:.2} ms ({:.0} fps)", total / n as f32, 1000.0 * n as f32 / total);
+            event_loop.exit();
+            return;
+        }
         if !self.opts.shots.is_empty() {
             let (w, h) = self.opts.shot_size;
             for shot in &self.opts.shots {
@@ -123,15 +142,15 @@ impl ApplicationHandler for App {
                 KeyCode::KeyT | KeyCode::Space => s.cam.toggle_tour(),
                 KeyCode::KeyN | KeyCode::KeyL => s.cycle_time(),
                 KeyCode::KeyP => s.paused = !s.paused,
-                KeyCode::KeyR | KeyCode::Digit1 => s.set_preset(0),
-                KeyCode::Digit2 => s.set_preset(1),
-                KeyCode::Digit3 => s.set_preset(2),
-                KeyCode::Digit4 => s.set_preset(3),
-                KeyCode::Digit5 => s.set_preset(4),
-                KeyCode::Digit6 => s.set_preset(5),
-                KeyCode::Digit7 => s.set_preset(6),
-                KeyCode::Digit8 => s.set_preset(7),
-                KeyCode::Digit9 => s.set_preset(8),
+                KeyCode::KeyR | KeyCode::Digit1 => s.fly_to_preset(0),
+                KeyCode::Digit2 => s.fly_to_preset(1),
+                KeyCode::Digit3 => s.fly_to_preset(2),
+                KeyCode::Digit4 => s.fly_to_preset(3),
+                KeyCode::Digit5 => s.fly_to_preset(4),
+                KeyCode::Digit6 => s.fly_to_preset(5),
+                KeyCode::Digit7 => s.fly_to_preset(6),
+                KeyCode::Digit8 => s.fly_to_preset(7),
+                KeyCode::Digit9 => s.fly_to_preset(8),
                 KeyCode::Escape => event_loop.exit(),
                 _ => {}
             },
@@ -147,7 +166,7 @@ impl ApplicationHandler for App {
 }
 
 pub fn parse_args(registry: &[SceneEntry]) -> Result<RunOptions, String> {
-    let mut opts = RunOptions { scene_idx: 0, shots: Vec::new(), shot_size: (1600, 900) };
+    let mut opts = RunOptions { scene_idx: 0, shots: Vec::new(), shot_size: (1600, 900), bench: false };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -171,6 +190,7 @@ pub fn parse_args(registry: &[SceneEntry]) -> Result<RunOptions, String> {
                 let (w, h) = v.split_once('x').ok_or("--size needs WxH")?;
                 opts.shot_size = (w.parse().map_err(|_| "bad width")?, h.parse().map_err(|_| "bad height")?);
             }
+            "--bench" => opts.bench = true,
             "--list" => {
                 for e in registry {
                     println!("{}", e.id);

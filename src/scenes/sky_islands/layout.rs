@@ -116,7 +116,6 @@ fn heading(from: Vec3, to: Vec3) -> f32 {
 impl SkyIslands {
     pub fn build() -> Self {
         let mut rng = Rng(7_2026);
-        let mut colors = ColorCache::new();
         let mut sb = SceneBuilder::new();
 
         // ---- Plan (pure math) ------------------------------------------------
@@ -128,49 +127,17 @@ impl SkyIslands {
             islands[*j].paths.push(heading(cj, ci));
         }
 
-        // ---- Islands ---------------------------------------------------------
+        // ---- Random planning (sequential: keeps the exact same RNG stream) -----
+        let stalactites: Vec<_> = islands.iter().map(|spec| spec.plan_stalactites(&mut rng)).collect();
         let mut lips = Vec::new();
         for spec in &islands {
-            let (vol, water) = spec.voxelize(&mut rng);
-            let at = [ModelInstance::from_trs(spec.center, 0.0, Vec3::ONE)];
-            let (m, c) = vol.compile(&mut colors);
-            sb.add_mesh(&m, c, &at, Pass::Opaque);
-            let (w, wc) = water.compile(&mut colors);
-            sb.add_mesh(&w, wc, &at, Pass::Translucent);
             if let Some((lip, dir)) = spec.waterfall_lip() {
                 lips.push((spec.center + lip, dir));
             }
         }
-
-        // ---- Cloud sea (static, opaque, receives island shadows) ---------------
-        let (sea, c) = effects::build_cloud_sea(&mut colors);
-        sb.add_mesh(&sea, c, &[ModelInstance::identity()], Pass::Opaque);
-
-        // ---- Observatory -----------------------------------------------------
-        let hero = &islands[HERO];
-        let (obs, c) = observatory::build_observatory(&hero.paths, &mut colors);
-        sb.add_mesh(&obs, c, &[ModelInstance::from_trs(hero.center, 0.0, Vec3::ONE)], Pass::Opaque);
-
-        // ---- Bridges ---------------------------------------------------------
-        for (_, _, b) in &bridges {
-            let (m, c) = b.build(&mut colors);
-            sb.add_mesh(&m, c, &[b.transform()], Pass::Opaque);
-        }
-
-        // ---- Flora -----------------------------------------------------------
-        let kit = build_flora(&mut colors);
-        sb.total_voxels += kit.voxels;
-        let mut meshes: Vec<&MeshData> = Vec::new();
-        let oak0 = meshes.len();
-        meshes.extend(kit.oaks.iter());
-        let blossom0 = meshes.len();
-        meshes.extend(kit.blossoms.iter());
-        let gold0 = meshes.len();
-        meshes.extend(kit.golds.iter());
-        let pine0 = meshes.len();
-        meshes.extend(kit.pines.iter());
-        let mut buckets: Vec<Vec<ModelInstance>> = vec![Vec::new(); meshes.len()];
-
+        // Tree placement (indices into the flora mesh list built below).
+        let (oak0, blossom0, gold0, pine0, n_trees) = (0usize, 3usize, 5usize, 7usize, 9usize);
+        let mut buckets: Vec<Vec<ModelInstance>> = vec![Vec::new(); n_trees];
         for (k, spec) in islands.iter().enumerate() {
             let grove = if k == HERO { Grove::Observatory } else { ROLES[k - 1].grove };
             let (min_d, keep_out, pool): (f32, f32, Vec<usize>) = match grove {
@@ -188,6 +155,82 @@ impl SkyIslands {
                 buckets[pick].push(ModelInstance::from_trs(p, rng.next_f32() * TAU, Vec3::splat(sc)));
             }
         }
+        // Bobbing islets: golden spiral, rejecting spots near real islands.
+        let mut islets: [Vec<Islet>; 3] = Default::default();
+        let n = 60;
+        for i in 0..n {
+            let (x, z) = golden_spiral(i, n, 230.0);
+            let clear = islands.iter().all(|s| (Vec3::new(x, 0.0, z) - s.center.with_y(0.0)).length() > s.radius * 1.4 + 10.0);
+            if !clear || (x * x + z * z).sqrt() < 50.0 {
+                continue;
+            }
+            islets[i % 3].push(Islet {
+                base: Vec3::new(x, 34.0 + hash2(x, z) * 90.0, z),
+                phase: rng.next_f32() * TAU,
+                spin: (rng.next_f32() - 0.5) * 0.08,
+                scale: 0.8 + rng.next_f32() * 0.5,
+            });
+        }
+        let islet_specs: Vec<IslandSpec> =
+            [3.0f32, 4.2, 5.6].iter().enumerate().map(|(k, r)| islet_spec(10.0 + k as f32 * 3.3, *r)).collect();
+        let islet_stal: Vec<_> = islet_specs.iter().map(|s| s.plan_stalactites(&mut rng)).collect();
+        let birds = effects::make_birds(islands[HERO].center, 18, &mut rng);
+        let clouds = effects::make_clouds(&mut rng);
+        let spray = effects::make_spray(&lips, 90, &mut rng);
+
+        // ---- Heavy geometry, generated in parallel ------------------------------
+        let compile = |v: MicroVoxelVolume| -> (MeshData, u64) { v.compile(&mut ColorCache::new()) };
+        let hero = &islands[HERO];
+        let (island_meshes, sea, obs, bridge_meshes, kit, rings, orb, islet_meshes, bird) = std::thread::scope(|sc| {
+            let isl = sc.spawn(|| {
+                let jobs: Vec<usize> = (0..islands.len()).collect();
+                par_map(&jobs, |&i| {
+                    let (vol, water) = islands[i].voxelize(&stalactites[i]);
+                    (compile(vol), compile(water))
+                })
+            });
+            let sea = sc.spawn(|| effects::build_cloud_sea(&mut ColorCache::new()));
+            let obs = sc.spawn(|| observatory::build_observatory(&hero.paths, &mut ColorCache::new()));
+            let br = sc.spawn(|| par_map(&bridges, |(_, _, b)| b.build(&mut ColorCache::new())));
+            let kit = sc.spawn(build_flora);
+            let rings = sc.spawn(|| {
+                let specs = [(5.6, pal::GOLD, pal::BRONZE), (4.7, pal::BRASS, pal::GOLD), (3.8, pal::BRONZE, pal::GOLD)];
+                par_map(&specs, |&(r, col, notch)| observatory::build_ring(r, col, notch, &mut ColorCache::new()))
+            });
+            let orb = sc.spawn(|| observatory::build_orb(&mut ColorCache::new()));
+            let islet_m = sc.spawn(|| {
+                let jobs: Vec<usize> = (0..islet_specs.len()).collect();
+                par_map(&jobs, |&k| compile(islet_specs[k].voxelize(&islet_stal[k]).0))
+            });
+            let bird = sc.spawn(|| effects::build_bird(&mut ColorCache::new()));
+            (
+                isl.join().unwrap(),
+                sea.join().unwrap(),
+                obs.join().unwrap(),
+                br.join().unwrap(),
+                kit.join().unwrap(),
+                rings.join().unwrap(),
+                orb.join().unwrap(),
+                islet_m.join().unwrap(),
+                bird.join().unwrap(),
+            )
+        });
+
+        // ---- Assemble (same batch order as before) ------------------------------
+        for (spec, (opaque, water)) in islands.iter().zip(&island_meshes) {
+            let at = [ModelInstance::from_trs(spec.center, 0.0, Vec3::ONE)];
+            sb.add_mesh(&opaque.0, opaque.1, &at, Pass::Opaque);
+            sb.add_mesh(&water.0, water.1, &at, Pass::Translucent);
+        }
+        sb.add_mesh(&sea.0, sea.1, &[ModelInstance::identity()], Pass::Opaque);
+        sb.add_mesh(&obs.0, obs.1, &[ModelInstance::from_trs(hero.center, 0.0, Vec3::ONE)], Pass::Opaque);
+        for ((_, _, b), (m, c)) in bridges.iter().zip(&bridge_meshes) {
+            sb.add_mesh(m, *c, &[b.transform()], Pass::Opaque);
+        }
+
+        sb.total_voxels += kit.voxels;
+        let meshes: Vec<&MeshData> = kit.oaks.iter().chain(&kit.blossoms).chain(&kit.golds).chain(&kit.pines).collect();
+        assert_eq!(meshes.len(), n_trees);
         for (mesh, list) in meshes.iter().zip(buckets.iter()) {
             let span = sb.push_mesh(mesh);
             sb.add_static(span, list, Pass::Opaque);
@@ -197,58 +240,25 @@ impl SkyIslands {
         let span = sb.push_mesh(&kit.spirit_tree);
         sb.add_static(span, &[ModelInstance::from_trs(spirit_base, 0.4, Vec3::ONE)], Pass::Opaque);
 
-        // ---- Dynamic: armillary sphere ------------------------------------------
-        for (r, col, notch) in [(5.6, pal::GOLD, pal::BRONZE), (4.7, pal::BRASS, pal::GOLD), (3.8, pal::BRONZE, pal::GOLD)] {
-            let (m, c) = observatory::build_ring(r, col, notch, &mut colors);
+        // Dynamic batches: order must match update_dynamic_instances.
+        for (m, c) in rings.iter().chain(std::iter::once(&orb)) {
             sb.total_voxels += c;
-            let span = sb.push_mesh(&m);
+            let span = sb.push_mesh(m);
             sb.add_dynamic(span, 1, Pass::Opaque);
         }
-        let (orb, c) = observatory::build_orb(&mut colors);
-        sb.total_voxels += c;
-        let span = sb.push_mesh(&orb);
-        sb.add_dynamic(span, 1, Pass::Opaque);
-
-        // ---- Dynamic: bobbing islets (golden spiral, rejecting real islands) ----
-        let mut islets: [Vec<Islet>; 3] = Default::default();
-        let n = 60;
-        for i in 0..n {
-            let (x, z) = golden_spiral(i, n, 230.0);
-            let clear = islands.iter().all(|s| (Vec3::new(x, 0.0, z) - s.center.with_y(0.0)).length() > s.radius * 1.4 + 10.0);
-            if !clear || (x * x + z * z).sqrt() < 50.0 {
-                continue;
-            }
-            let k = i % 3;
-            islets[k].push(Islet {
-                base: Vec3::new(x, 34.0 + hash2(x, z) * 90.0, z),
-                phase: rng.next_f32() * TAU,
-                spin: (rng.next_f32() - 0.5) * 0.08,
-                scale: 0.8 + rng.next_f32() * 0.5,
-            });
-        }
-        for (k, r) in [3.0f32, 4.2, 5.6].iter().enumerate() {
-            let spec = islet_spec(10.0 + k as f32 * 3.3, *r);
-            let (vol, _) = spec.voxelize(&mut rng);
-            let (m, c) = vol.compile(&mut colors);
+        for (k, (m, c)) in islet_meshes.iter().enumerate() {
             sb.total_voxels += c;
-            let span = sb.push_mesh(&m);
+            let span = sb.push_mesh(m);
             sb.add_dynamic(span, islets[k].len(), Pass::Opaque);
         }
-
-        // ---- Dynamic: birds ---------------------------------------------------
-        let birds = effects::make_birds(hero.center, 18, &mut rng);
-        let (bm, c) = effects::build_bird(&mut colors);
-        sb.total_voxels += c;
-        let span = sb.push_mesh(&bm);
+        sb.total_voxels += bird.1;
+        let span = sb.push_mesh(&bird.0);
         sb.add_dynamic(span, birds.len(), Pass::Opaque);
 
-        // ---- Dynamic translucent: cloud sea + waterfall spray -----------------
-        let clouds = effects::make_clouds(&mut rng);
+        let mut colors = ColorCache::new();
         let cloud_mesh = build_unit_box_mesh(9.5, 3.4, 9.5, MAT_CLOUD as u32, pal::CLOUD, &mut colors);
         let span = sb.push_mesh(&cloud_mesh);
         sb.add_dynamic(span, clouds.len(), Pass::Translucent);
-
-        let spray = effects::make_spray(&lips, 90, &mut rng);
         let mist_mesh = build_unit_box_mesh(0.55, 0.55, 0.55, MAT_MIST as u32, pal::MIST, &mut colors);
         let span = sb.push_mesh(&mist_mesh);
         sb.add_dynamic(span, spray.len(), Pass::Translucent);

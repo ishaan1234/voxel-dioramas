@@ -68,9 +68,8 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
 // -------------------- MICRO-VOXEL SHADOW & LIT PASS --------------------
 struct VIn {
     @location(0) v_pos: vec3<f32>,
-    @location(1) v_norm: vec3<f32>,
-    @location(2) v_col: vec3<f32>,
-    @location(3) v_mat: u32,
+    @location(1) v_col: vec4<f32>,
+    @location(2) v_nm: u32,       // bits 0..7 normal index, 8..15 material
     @location(4) m0: vec4<f32>,
     @location(5) m1: vec4<f32>,
     @location(6) m2: vec4<f32>,
@@ -85,6 +84,12 @@ struct VOut {
     @location(3) @interpolate(flat) mat_id: u32,
 };
 
+const AXIS_NORMALS = array<vec3<f32>, 6>(
+    vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-1.0, 0.0, 0.0),
+    vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, -1.0, 0.0),
+    vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 0.0, -1.0),
+);
+
 @vertex
 fn vs_shadow(in: VIn) -> @builtin(position) vec4<f32> {
     let model = mat4x4<f32>(in.m0, in.m1, in.m2, in.m3);
@@ -96,13 +101,13 @@ fn vs_shadow(in: VIn) -> @builtin(position) vec4<f32> {
 fn vs_main(in: VIn) -> VOut {
     let model = mat4x4<f32>(in.m0, in.m1, in.m2, in.m3);
     let wpos = (model * vec4<f32>(in.v_pos, 1.0)).xyz;
-    let wnorm = normalize((model * vec4<f32>(in.v_norm, 0.0)).xyz);
+    let wnorm = normalize((model * vec4<f32>(AXIS_NORMALS[in.v_nm & 0xffu], 0.0)).xyz);
     var out: VOut;
     out.world_pos = wpos;
     out.normal = wnorm;
     out.clip = u.view_proj * vec4<f32>(wpos, 1.0);
-    out.color = in.v_col;
-    out.mat_id = in.v_mat;
+    out.color = in.v_col.rgb;
+    out.mat_id = (in.v_nm >> 8u) & 0xffu;
     return out;
 }
 
@@ -113,17 +118,23 @@ fn sample_shadow(wpos: vec3<f32>, n: vec3<f32>) -> f32 {
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
         return 1.0;
     }
-    let texel = 1.0 / 2048.0;
-    var sum = 0.0;
-    for (var y = -1; y <= 1; y++) {
-        for (var x = -1; x <= 1; x++) {
-            sum += textureSampleCompareLevel(
-                shadow_tex, shadow_samp,
-                uv + vec2<f32>(f32(x), f32(y)) * texel,
-                ndc.z - 0.0007
-            );
-        }
-    }
+    // Mathematically identical to the original 3x3 grid of bilinear compare
+    // taps, in 4 taps: along each axis the 3x3 grid weights texels
+    // (1-f, 1, 1, f); each hardware bilinear tap is placed so it blends one
+    // pair of texels in exactly that ratio, then scaled by the pair's weight.
+    let size = 2048.0;
+    let z = ndc.z - 0.0007;
+    let tc = uv * size - vec2<f32>(0.5);
+    let base = floor(tc);
+    let f = tc - base;
+    let w_a = vec2<f32>(2.0) - f;                       // pair (base-1, base)
+    let w_b = vec2<f32>(1.0) + f;                       // pair (base+1, base+2)
+    let p_a = (base - vec2<f32>(1.0) + vec2<f32>(1.0) / w_a + vec2<f32>(0.5)) / size;
+    let p_b = (base + vec2<f32>(1.0) + f / w_b + vec2<f32>(0.5)) / size;
+    var sum = w_a.x * w_a.y * textureSampleCompareLevel(shadow_tex, shadow_samp, vec2<f32>(p_a.x, p_a.y), z);
+    sum += w_b.x * w_a.y * textureSampleCompareLevel(shadow_tex, shadow_samp, vec2<f32>(p_b.x, p_a.y), z);
+    sum += w_a.x * w_b.y * textureSampleCompareLevel(shadow_tex, shadow_samp, vec2<f32>(p_a.x, p_b.y), z);
+    sum += w_b.x * w_b.y * textureSampleCompareLevel(shadow_tex, shadow_samp, vec2<f32>(p_b.x, p_b.y), z);
     return sum / 9.0;
 }
 

@@ -23,6 +23,13 @@ pub struct Lake {
     pub waterfall: bool,
 }
 
+#[derive(Clone, Copy)]
+pub struct Stalactite {
+    pub a: Vec3,
+    pub b: Vec3,
+    pub r0: f32,
+}
+
 #[derive(Clone)]
 pub struct IslandSpec {
     pub name: &'static str,
@@ -151,8 +158,31 @@ impl IslandSpec {
         pal::ROCK[band.rem_euclid(pal::ROCK.len() as i32) as usize]
     }
 
+    /// Stalactites hanging from the underside on a golden spiral. This is the
+    /// only random part of an island, so it is planned separately (cheap,
+    /// sequential) and the heavy voxelising can then run in parallel.
+    pub fn plan_stalactites(&self, rng: &mut Rng) -> Vec<Stalactite> {
+        let n = (self.radius * 0.7) as usize;
+        let mut out = Vec::new();
+        for i in 0..n {
+            let (sx, sz) = golden_spiral(i, n, self.radius * 0.8);
+            let (sx, sz) = (sx + self.seed.sin() * 2.0, sz);
+            if self.e(sx, sz) > 0.85 {
+                continue;
+            }
+            let top = self.bottom_y(sx, sz) + 1.2;
+            let f = 1.0 - self.e(sx, sz);
+            let len = (2.0 + rng.next_f32() * 6.0) * (0.4 + f);
+            let r0 = 0.9 + rng.next_f32() * 1.4 * f;
+            let a = Vec3::new(sx, top, sz);
+            let b = Vec3::new(sx + (rng.next_f32() - 0.5) * 1.5, top - len, sz + (rng.next_f32() - 0.5) * 1.5);
+            out.push(Stalactite { a, b, r0 });
+        }
+        out
+    }
+
     /// Voxelise this island. Returns (opaque volume, water volume).
-    pub fn voxelize(&self, rng: &mut Rng) -> (MicroVoxelVolume, MicroVoxelVolume) {
+    pub fn voxelize(&self, stalactites: &[Stalactite]) -> (MicroVoxelVolume, MicroVoxelVolume) {
         let s = ISLAND_SCALE;
         let ext = self.radius * 1.32;
         let up = 6.0;
@@ -203,20 +233,9 @@ impl IslandSpec {
             },
         );
 
-        // 2. Stalactites: tapered capsules hanging from the underside on a golden spiral.
-        let n = (self.radius * 0.7) as usize;
-        for i in 0..n {
-            let (sx, sz) = golden_spiral(i, n, self.radius * 0.8);
-            let (sx, sz) = (sx + self.seed.sin() * 2.0, sz);
-            if self.e(sx, sz) > 0.85 {
-                continue;
-            }
-            let top = self.bottom_y(sx, sz) + 1.2;
-            let f = 1.0 - self.e(sx, sz);
-            let len = (2.0 + rng.next_f32() * 6.0) * (0.4 + f);
-            let r0 = 0.9 + rng.next_f32() * 1.4 * f;
-            let a = Vec3::new(sx, top, sz);
-            let b = Vec3::new(sx + (rng.next_f32() - 0.5) * 1.5, top - len, sz + (rng.next_f32() - 0.5) * 1.5);
+        // 2. Stalactites (planned up front by `plan_stalactites`).
+        for st in stalactites {
+            let (a, b, r0) = (st.a, st.b, st.r0);
             let pad = Vec3::splat(r0 + 1.0);
             vol.fill_sdf(a.min(b) - pad, a.max(b) + pad, |p| sdf::tapered_capsule(p, a, b, r0, 0.15), |p, _| {
                 Some((MAT_MATTE, self.rock_color(p)))
