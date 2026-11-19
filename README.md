@@ -19,7 +19,7 @@ toolkit, so new worlds are written as **math**, not hand-placed voxels.
 | id | Scene | Highlights |
 |---|---|---|
 | `sky-islands` | **Sky Islands** (default) | 7 floating islands above a cloud sea, observatory with a spinning armillary sphere, catenary rope bridges, recursive trees, ballistic waterfalls |
-| `sakura` | **桜の帝都村 Sakura Empire** | The original 896×896 micro-terrain diorama: pagoda, town, river, harbor, 2,800 GPU petals |
+| `sakura` | **Sakura Empire** | The original 896×896 micro-terrain diorama: pagoda, town, river, harbor, 2,800 GPU petals |
 
 ### Sky Islands: how each piece is generated
 

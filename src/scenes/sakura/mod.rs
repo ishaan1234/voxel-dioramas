@@ -1,4 +1,4 @@
-//! 桜の帝都村 — the original Massive Micro-Voxel Sakura Empire diorama.
+//! Sakura Empire: the original Massive Micro-Voxel Sakura Empire diorama.
 
 mod archetypes;
 mod kit;

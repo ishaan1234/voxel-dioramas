@@ -700,7 +700,7 @@ impl SakuraScene {
         let dynamic_inst_count = cur_inst - dynamic_inst_start;
         let (tour_pos, tour_look) = make_tour_curves();
         let data = SceneData {
-            title: "桜の帝都村 · Sakura Empire".to_string(),
+            title: "Sakura Empire".to_string(),
             vertices,
             indices,
             static_instances,
